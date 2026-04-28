@@ -10,6 +10,30 @@ An AI-driven intraday stock trading bot that trades NSE/BSE stocks via the Upsto
 
 ---
 
+## Constraints
+
+### Capital
+- **Trading capital: ₹4,000 INR**
+- Upstox intraday brokerage: ₹20 flat per executed order (buy + sell = ₹40 round-trip)
+- Additional charges per trade: STT (0.025% on sell side), exchange transaction charges (~0.00325%), GST (18% on brokerage), SEBI charges
+- Round-trip cost on ₹4,000 is roughly ₹45–50, ~1.1–1.25% of capital
+- **Implication:** Claude must require high confidence (≥ 0.80) before placing any trade. Frequent low-confidence trades will destroy the account through charges alone. Claude is explicitly told the charge structure in every prompt.
+- Only stocks priced below ₹3,900 per share can be traded (to afford at least 1 share with buffer for charges)
+
+### Claude API Budget
+- **Budget: $9 USD total**
+- claude-sonnet-4-6 pricing: $3/MTok input, $15/MTok output; cached input: $0.30/MTok
+- Estimated prompt size per cycle: ~3,000–5,000 tokens input, ~300 tokens output
+- Without caching: ~$0.013–0.020 per cycle → $9 lasts ~450–700 cycles (~6–10 trading days at 72 cycles/day
+- **With prompt caching:** System prompt and static instructions are cached; only the market data changes each cycle. Estimated cost drops to ~$0.003–0.005 per cycle → $9 lasts ~1,800–3,000 cycles (~25–40 trading days
+- **Hard budget limit:** Bot tracks cumulative Claude API spend via token counts. If estimated spend exceeds $8.50, the bot stops calling Claude and sends an alert. The $0.50 buffer is preserved for error-recovery calls.
+- **Skip-if-unchanged:** If market data has not changed meaningfully from the previous cycle (price movement < 0.3%, no new news), skip the Claude call and carry forward the previous HOLD decision. This alone can cut Claude calls by 30–50%.
+
+### Upstox API
+- Rate limits apply — full market scan is pre-filtered to top ~200 stocks by volume before fetching detailed data, to stay within limits.
+
+---
+
 ## Architecture
 
 Two processes run side by side from `main.py`:
@@ -65,7 +89,10 @@ Outputs an enriched dict per stock, ready for Claude.
 Fetches recent financial news headlines for the top stock candidates (post-indicator pre-filter) from a financial news API (Finnhub or NewsAPI). Attaches headline list and basic sentiment context to each stock's data packet.
 
 ### `claude_engine.py`
-- Builds a structured prompt containing: portfolio state, available capital, current time, top stock candidates with all indicators and news
+- Builds a structured prompt containing: portfolio state, available capital (₹4,000), charge structure (₹45–50 round-trip cost), current time, top stock candidates with all indicators and news
+- Uses **Anthropic prompt caching** — the system prompt (instructions, charge structure, decision format) is marked as a cache breakpoint so it is only billed at $0.30/MTok on cache hits; only the market data section changes each cycle
+- Tracks cumulative token usage and estimated spend in `state.json`; refuses to call Claude if estimated total exceeds $8.50
+- Implements **skip-if-unchanged**: if price movement < 0.3% and no new news since last cycle, skips the Claude call and returns previous HOLD decision
 - Calls Claude API (claude-sonnet-4-6) with the prompt
 - Expects Claude to return a JSON decision:
   ```json
@@ -78,6 +105,8 @@ Fetches recent financial news headlines for the top stock candidates (post-indic
     "reasoning": "..."
   }
   ```
+- Claude is instructed to only return BUY/SELL when confidence ≥ 0.80, given the high charge-to-capital ratio
+- Claude is instructed to only consider stocks priced below ₹3,900 per share
 - Parses and validates the JSON response
 - For error recovery: passes error context + portfolio state to Claude, which returns one of `RETRY`, `SKIP_CYCLE`, `CLOSE_ALL`, or `CONTINUE`
 
@@ -151,6 +180,8 @@ On error at any stage:
 - Past 3:15 PM IST with open positions → force close, no exceptions
 - Claude API unreachable for 3+ consecutive retries → stop bot, send alert, require manual restart
 - Margin breach detected → close all positions immediately, stop bot
+- Estimated Claude API spend ≥ $8.50 → stop calling Claude, send alert, require manual restart
+- Claude returns confidence < 0.80 for BUY/SELL → downgrade to HOLD automatically, no order placed
 
 **Claude-managed recovery (everything else):**
 - Data API errors, rate limits, malformed responses, order rejections, partial fills
@@ -169,12 +200,17 @@ UPSTOX_ACCESS_TOKEN=
 ANTHROPIC_API_KEY=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
-TWILIO_ACCOUNT_SID=       # optional, for WhatsApp
-TWILIO_AUTH_TOKEN=        # optional
-TWILIO_WHATSAPP_FROM=     # optional
-NEWS_API_KEY=             # Finnhub or NewsAPI
-PAPER_TRADE=true          # set to false for live trading
+TWILIO_ACCOUNT_SID=           # optional, for WhatsApp
+TWILIO_AUTH_TOKEN=            # optional
+TWILIO_WHATSAPP_FROM=         # optional
+NEWS_API_KEY=                 # Finnhub or NewsAPI
+PAPER_TRADE=true              # set to false for live trading
 CYCLE_INTERVAL_MINUTES=5
+TRADING_CAPITAL_INR=4000
+CLAUDE_API_BUDGET_USD=9.00
+CLAUDE_API_BUDGET_STOP_USD=8.50
+MIN_CONFIDENCE_THRESHOLD=0.80
+MAX_STOCK_PRICE_INR=3900
 ```
 
 ---
