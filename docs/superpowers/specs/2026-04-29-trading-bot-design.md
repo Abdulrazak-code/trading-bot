@@ -261,3 +261,81 @@ No tests call real Upstox or Claude APIs.
 10. `dashboard/` — FastAPI + UI
 11. `main.py` — entry point launching both processes
 12. Full test suite
+
+---
+
+## Open Questions & Gaps
+**Status:** To be resolved before implementation begins.
+
+---
+
+### CRITICAL
+
+**[GAP-1] No Stop-Loss**
+The only exit triggers are Claude returning SELL or the 3:15 PM force-close. There is no intraday stop-loss. A stock dropping 5% on ₹4,000 = ₹200 loss, wiping out 4+ trades worth of profit needed to cover charges.
+- Decision needed: What is the stop-loss threshold (e.g., exit if position is down >2%)? Is it a hard-coded rule in `order_executor.py` or passed to Claude?
+- Is it a fixed % of entry price, or ATR-based?
+
+**[GAP-2] Upstox Token Refresh is Undefined**
+`auth.py` is a one-time script. The spec says the trading loop "refreshes the token daily at startup" but Upstox OAuth tokens require a browser redirect to refresh — this cannot happen silently in an unattended bot.
+- Decision needed: How does the daily token refresh actually work? Does it use a refresh token? Does Upstox support silent refresh without browser interaction? Does the user need to manually run `auth.py` every morning?
+
+**[GAP-3] EOD Force-Close Order Type Unspecified**
+"At 3:15 PM, execute forced close of all open positions" — the order type is not specified. A limit order might not fill if the market moves. A market order guarantees exit but with unknown slippage.
+- Decision needed: What order type is used for EOD close? What is the fallback if the close order is rejected or partially fills? Does the bot retry? Alert and stop?
+
+**[GAP-4] Circuit Breaker / Trading Halt Handling**
+NSE stocks hit upper/lower circuits regularly and become untradeable while locked. If the bot holds a position in a stock that hits lower circuit, it cannot exit — not even at 3:15 PM.
+- Decision needed: How does the bot detect that a held stock is circuit-locked? What is the recovery action? Does it alert and wait, or is there another exit mechanism?
+
+---
+
+### HIGH
+
+**[GAP-5] REST Polling Will Hit Upstox Rate Limits**
+200 stocks × 72 cycles/day = ~14,400 REST calls per day for price/OHLCV data alone. Upstox rate limits will be hit.
+- Decision needed: Switch to Upstox WebSocket market data streaming (subscribe once, receive continuous updates, trading loop reads in-memory cache) instead of REST polling every 5 minutes? This is the standard approach for intraday systems and would reduce API calls to near-zero for price data.
+
+**[GAP-6] Quantity Calculation Logic is Missing**
+Claude returns a `quantity` in its JSON response, but the spec does not say how Claude knows what quantity to request. Claude needs to know exact available cash, current price, and the ₹45–50 charge impact to calculate a sensible quantity.
+- Decision needed: Is quantity calculated by `order_executor.py` before passing to Claude (Claude only decides BUY/SELL/HOLD), or does Claude calculate it from the cash figure passed in the prompt? Either way, the formula and who owns it must be defined.
+
+**[GAP-7] `state.json` Has No Concurrency Protection**
+The trading loop (writer) and dashboard server (reader) access `state.json` simultaneously. A write mid-read will produce a corrupted/partial read, causing the dashboard to show wrong state or crash.
+- Decision needed: Use atomic writes (write to a temp file, then rename) for the trading loop, or use a lightweight locking mechanism. Define who is the single writer.
+
+---
+
+### MEDIUM
+
+**[GAP-8] Partial Fill Handling is Vague**
+`order_executor.py` "handles partial fills" but no detail is given. If Claude says buy 100 shares and only 60 fill, what quantity is recorded in `state.json`? Does the bot try to fill the remaining 40 in the next cycle or accept the partial position?
+- Decision needed: Accept partial fills as the full position (record actual filled quantity). Do not attempt to top up — it adds complexity and more charges.
+
+**[GAP-9] News Deduplication Missing**
+`news.py` fetches RSS every cycle. The same headline will reappear across many cycles, potentially biasing Claude repeatedly on stale news. No headline age filter or seen-headline tracking is mentioned.
+- Decision needed: Track seen headline URLs/hashes in `state.json`. Only pass headlines newer than X hours (suggest 4 hours) to Claude. Headlines already seen in a prior cycle are marked as `[repeated]` or omitted.
+
+**[GAP-10] Claude JSON Parse Failure Unhandled**
+If Claude returns malformed JSON or a response that doesn't match the expected schema, the spec doesn't describe what happens. An unhandled parse error will crash `claude_engine.py`.
+- Decision needed: On JSON parse failure, treat the cycle as HOLD, log an ERROR row, send alert, and continue. Do not retry the Claude call (it will likely produce the same output and cost more).
+
+**[GAP-11] Paper Trade Mode Doesn't Simulate Fills**
+`PAPER_TRADE=true` logs decisions without placing real orders, but `state.json` will still record an "open position." The EOD close will then attempt to close a position that never existed via the real API.
+- Decision needed: Paper trade mode must fully simulate the position lifecycle in `state.json` without any Upstox API calls. EOD close in paper mode just clears the simulated position from state. Notifier still fires so alerts can be tested.
+
+---
+
+### LOW
+
+**[GAP-12] No Drawdown / Capital Preservation Limit**
+If the account loses ₹500 across multiple bad days, the bot continues trading with reduced capital as if nothing changed. No daily loss limit or account-floor is defined.
+- Decision needed: Add a configurable `MAX_DAILY_LOSS_INR` env var (suggest ₹200). If realised P&L for the day crosses this threshold, the bot stops placing new orders for the rest of that day and sends an alert.
+
+**[GAP-13] MIS Eligibility List Not Refreshed Mid-Day**
+The MIS-eligible stock list is fetched at startup. If Upstox removes a stock from MIS eligibility during the trading day (which it can do), the bot may attempt an MIS order that gets rejected.
+- Decision needed: Re-validate MIS eligibility immediately before placing any order, not just at startup.
+
+**[GAP-14] No Backtesting**
+The bot will go live with real money based solely on Claude's judgment + indicator scoring, with no historical validation of the strategy.
+- Decision needed: Is backtesting in scope before go-live? At minimum, a paper-trade run of 2–3 days before switching to live orders is strongly recommended.
