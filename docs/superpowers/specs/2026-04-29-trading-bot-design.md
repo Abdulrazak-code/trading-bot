@@ -18,7 +18,10 @@ An AI-driven intraday stock trading bot that trades NSE/BSE stocks via the Upsto
 - Additional charges per trade: STT (0.025% on sell side), exchange transaction charges (~0.00325%), GST (18% on brokerage), SEBI charges
 - Round-trip cost on ₹4,000 is roughly ₹45–50, ~1.1–1.25% of capital
 - **Implication:** Claude must require high confidence (≥ 0.80) before placing any trade. Frequent low-confidence trades will destroy the account through charges alone. Claude is explicitly told the charge structure in every prompt.
-- Only stocks priced below ₹3,900 per share can be traded (to afford at least 1 share with buffer for charges)
+- No upper price cap on stocks — small/cheap stocks are actively preferred as they allow more shares per trade and larger absolute gains per % move on ₹4,000 capital
+- **Liquidity filter (hard requirement):** Only stocks with average daily traded value ≥ ₹1 crore and average daily volume ≥ 50,000 shares are eligible. This ensures positions can be entered and exited quickly within the intraday window. Thin-volume stocks risk wide bid-ask spreads and inability to exit before 3:15 PM.
+- **Bid-ask spread filter:** Claude is given the order book (already fetched) and instructed to reject any stock where the current spread exceeds 0.5% of price — spread cost compounds with charges on small capital
+- **Upstox MIS eligibility:** Only stocks approved by Upstox for intraday (MIS) trading are considered. The data fetcher filters to the MIS-eligible list before passing candidates to Claude.
 
 ### Claude API Budget
 - **Budget: $9 USD total**
@@ -106,7 +109,7 @@ Fetches recent financial news headlines for the top stock candidates (post-indic
   }
   ```
 - Claude is instructed to only return BUY/SELL when confidence ≥ 0.80, given the high charge-to-capital ratio
-- Claude is instructed to only consider stocks priced below ₹3,900 per share
+- Claude is instructed to prefer lower-priced liquid stocks (more shares = more granular position sizing on ₹4,000 capital), but price alone is not a filter — liquidity and bid-ask spread are the hard filters applied before Claude sees the candidates
 - Parses and validates the JSON response
 - For error recovery: passes error context + portfolio state to Claude, which returns one of `RETRY`, `SKIP_CYCLE`, `CLOSE_ALL`, or `CONTINUE`
 
@@ -210,7 +213,9 @@ TRADING_CAPITAL_INR=4000
 CLAUDE_API_BUDGET_USD=9.00
 CLAUDE_API_BUDGET_STOP_USD=8.50
 MIN_CONFIDENCE_THRESHOLD=0.80
-MAX_STOCK_PRICE_INR=3900
+MIN_DAILY_TRADED_VALUE_CR=1      # minimum ₹1 crore average daily traded value
+MIN_DAILY_VOLUME=50000           # minimum average daily volume in shares
+MAX_BID_ASK_SPREAD_PCT=0.5       # reject stocks with spread > 0.5% of price
 ```
 
 ---
