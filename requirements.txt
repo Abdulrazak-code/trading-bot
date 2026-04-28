@@ -1,0 +1,6 @@
+anthropic==0.49.0
+requests==2.32.3
+schedule==1.2.2
+python-dotenv==1.1.0
+pytest==8.3.5
+pytest-mock==3.14.0
