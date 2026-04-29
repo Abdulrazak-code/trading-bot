@@ -4,7 +4,10 @@ from datetime import datetime, timezone, timedelta
 import schedule
 
 import config
-from data_fetcher import get_funds, get_instruments_nse, get_market_quotes_ltp, apply_liquidity_filter, apply_spread_filter
+from data_fetcher import (
+    get_funds, get_instruments_nse, get_market_quotes_ltp,
+    apply_liquidity_filter, apply_spread_filter, get_ohlcv, get_cached_price,
+)
 from indicators import compute_indicators, score_and_rank, compress_packet
 from news import fetch_headlines, match_headlines_to_symbols
 from claude_engine import ClaudeEngine, _candidates_hash
@@ -31,7 +34,7 @@ def is_market_open(dt: datetime | None = None) -> bool:
 
 def is_eod_close_time(dt: datetime | None = None) -> bool:
     t = dt or ist_now()
-    return t.hour == 15 and t.minute == 15
+    return t.hour == 15 and t.minute >= 15
 
 
 class Scheduler:
@@ -45,15 +48,19 @@ class Scheduler:
             twilio_sid=config.TWILIO_ACCOUNT_SID,
             twilio_token=config.TWILIO_AUTH_TOKEN,
             whatsapp_from=config.TWILIO_WHATSAPP_FROM,
+            whatsapp_to=config.WHATSAPP_TO,
         )
+        self._eod_closed_date = None  # prevents double-selling if cycle fires multiple times at 15:15+
 
     def run_cycle(self):
         if not is_market_open():
             return
 
         state = load_state(self._state_path)
+        today = ist_now().date()
 
-        if is_eod_close_time():
+        if is_eod_close_time() and self._eod_closed_date != today:
+            self._eod_closed_date = today
             self._eod_close(state)
             return
 
@@ -68,12 +75,13 @@ class Scheduler:
         if not pos:
             return
         try:
+            current_price = get_cached_price(pos["instrument_key"]) or pos["entry_price"]
             new_state = self._executor.execute_sell(
-                pos["stock"], price=0.0, qty=pos["qty"], state=state, reason="EOD forced close"
+                pos["stock"], price=current_price, qty=pos["qty"], state=state, reason="EOD forced close"
             )
             save_state(new_state, self._state_path)
-            log_trade("SELL", pos["stock"], 0, 0, "EOD forced close", 0)
-            self._notifier.send(f"EOD close: sold {pos['stock']}")
+            log_trade("SELL", pos["stock"], current_price * pos["qty"], current_price, "EOD forced close", 0)
+            self._notifier.send(f"EOD close: sold {pos['stock']} @ ₹{current_price:.2f}")
         except Exception as e:
             self._notifier.send(f"EOD CLOSE FAILED for {pos['stock']}: {e} — manual intervention required")
 
@@ -81,7 +89,6 @@ class Scheduler:
         pos = state.get("position")
 
         if pos:
-            from data_fetcher import get_cached_price
             current_price = get_cached_price(pos["instrument_key"]) or pos["entry_price"]
 
             if self._executor.check_circuit_breaker(pos["instrument_key"]):
@@ -111,28 +118,53 @@ class Scheduler:
         filtered_keys = apply_spread_filter({k: quotes[k] for k in liquid_keys})
 
         seen_hashes = set(state.get("seen_headline_hashes", []))
-        _, new_hashes = fetch_headlines(seen_hashes)
+        all_entries, new_hashes = fetch_headlines(seen_hashes)
+
+        candidate_keys = filtered_keys[:config.TOP_CANDIDATES * 2]
+        symbols = [k.split("|")[-1] for k in candidate_keys]
+        headlines_map = match_headlines_to_symbols(all_entries, symbols)
 
         candidates_data = {}
-        for key in filtered_keys[:config.TOP_CANDIDATES]:
+        for key in candidate_keys:
+            if len(candidates_data) >= config.TOP_CANDIDATES:
+                break
             sym = key.split("|")[-1]
+            try:
+                df = get_ohlcv(key)
+                if df.empty or len(df) < 20:
+                    continue
+                ind = compute_indicators(df)
+            except Exception:
+                continue
+            q = quotes[key]
+            price = float(q.get("last_price", 0))
+            if price <= 0:
+                continue
+            depth = q.get("depth", {})
+            buys = depth.get("buy", [])
+            sells = depth.get("sell", [])
+            best_bid = float(buys[0].get("price", price)) if buys else price
+            best_ask = float(sells[0].get("price", price)) if sells else price
+            spread_pct = (best_ask - best_bid) / price * 100 if price > 0 else 0.5
             candidates_data[sym] = {
-                "price": float(quotes[key].get("last_price", 0)),
-                "volume_spike": 1.0,
-                "rsi": 50.0,
-                "macd_signal": 0.0,
-                "vwap_pct": 0.0,
-                "spread_pct": 0.1,
-                "bb_position": 0.5,
-                "atr": 1.0,
+                "price": price,
+                "volume_spike": ind["volume_spike"],
+                "rsi": ind["rsi"],
+                "macd_signal": ind["macd_signal"],
+                "vwap_pct": ind["vwap_pct"],
+                "spread_pct": spread_pct,
+                "bb_position": ind["bb_position"],
+                "atr": ind["atr"],
             }
 
-        compressed = {sym: compress_packet(sym, data, []) for sym, data in candidates_data.items()}
+        ranked = score_and_rank(candidates_data, n=config.TOP_CANDIDATES)
+        compressed = {sym: compress_packet(sym, data, headlines_map.get(sym, [])) for sym, data in ranked.items()}
+
         cash = get_funds()
         portfolio = {"cash": cash, "position": pos}
         decision, new_state = self._engine.decide(compressed, portfolio, state)
 
-        new_state["seen_headline_hashes"] = list(seen_hashes | new_hashes)
+        new_state["seen_headline_hashes"] = list(seen_hashes | new_hashes)[-500:]
         save_state(new_state, self._state_path)
 
         if decision.action == "BUY" and not pos:
@@ -146,7 +178,6 @@ class Scheduler:
                                                 confidence=decision.confidence, reasoning=decision.reasoning)
                 )
         elif decision.action == "SELL" and pos:
-            from data_fetcher import get_cached_price
             current_price = get_cached_price(pos["instrument_key"]) or pos["entry_price"]
             new_state = self._executor.execute_sell(pos["stock"], current_price, pos["qty"], new_state, decision.reasoning)
             save_state(new_state, self._state_path)

@@ -26,8 +26,9 @@ def test_market_closed_after_close():
 
 def test_eod_close_triggers_at_3_15():
     assert is_eod_close_time(_ist(15, 15)) is True
-    assert is_eod_close_time(_ist(15, 14)) is False
-    assert is_eod_close_time(_ist(15, 20)) is False
+    assert is_eod_close_time(_ist(15, 20)) is True   # within EOD window
+    assert is_eod_close_time(_ist(15, 14)) is False  # before window
+    assert is_eod_close_time(_ist(16, 0)) is False   # next hour
 
 
 def test_weekend_is_not_market_open():
