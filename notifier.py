@@ -9,12 +9,14 @@ class Notifier:
         twilio_sid: str | None = None,
         twilio_token: str | None = None,
         whatsapp_from: str | None = None,
+        whatsapp_to: str | None = None,
     ):
         self._telegram_token = telegram_token
         self._chat_id = chat_id
         self._twilio_sid = twilio_sid
         self._twilio_token = twilio_token
         self._whatsapp_from = whatsapp_from
+        self._whatsapp_to = whatsapp_to
 
     def send(self, text: str):
         self._send_telegram(text)
@@ -35,7 +37,7 @@ class Notifier:
             client.messages.create(
                 body=text,
                 from_=f"whatsapp:{self._whatsapp_from}",
-                to=f"whatsapp:{self._chat_id}",
+                to=f"whatsapp:{self._whatsapp_to}",
             )
         except Exception:
             pass

@@ -31,9 +31,9 @@ class Decision:
     reasoning: str
 
 
-def _estimate_cost_usd(input_tokens: int, output_tokens: int, cache_read: int) -> float:
-    uncached = input_tokens - cache_read
-    return (uncached * 3.0 + cache_read * 0.3 + output_tokens * 15.0) / 1_000_000
+def _estimate_cost_usd(input_tokens: int, output_tokens: int, cache_read: int, cache_creation: int = 0) -> float:
+    uncached = input_tokens - cache_read - cache_creation
+    return (uncached * 3.0 + cache_read * 0.3 + cache_creation * 3.75 + output_tokens * 15.0) / 1_000_000
 
 
 def _candidates_hash(candidates: dict) -> str:
@@ -103,6 +103,7 @@ class ClaudeEngine:
             msg.usage.input_tokens,
             msg.usage.output_tokens,
             getattr(msg.usage, "cache_read_input_tokens", 0),
+            getattr(msg.usage, "cache_creation_input_tokens", 0),
         )
         new_state = {
             **state,
