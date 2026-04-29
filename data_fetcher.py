@@ -45,7 +45,7 @@ def get_instruments_nse() -> list:
     resp.raise_for_status()
     with gzip.open(io.BytesIO(resp.content)) as f:
         instruments = json.load(f)
-    return [i for i in instruments if i.get("segment") == "NSE_EQ" and i.get("series") == "EQ"]
+    return [i for i in instruments if i.get("segment") == "NSE_EQ" and i.get("instrument_type") == "EQ"]
 
 
 def get_market_quotes_ltp(instrument_keys: list) -> dict:
@@ -66,7 +66,7 @@ def get_market_quotes_ltp(instrument_keys: list) -> dict:
     return result
 
 
-def get_ohlcv(instrument_key: str, interval: str = "5minute") -> pd.DataFrame:
+def get_ohlcv(instrument_key: str, interval: str = "1minute") -> pd.DataFrame:
     """Fetch intraday OHLCV candles for a single instrument."""
     to_date = datetime.now(_IST).strftime("%Y-%m-%d")
     resp = requests.get(
