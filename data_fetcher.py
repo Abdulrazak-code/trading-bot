@@ -86,7 +86,7 @@ def apply_liquidity_filter(quotes: dict) -> list:
     """Keep only instruments passing daily traded value filter."""
     passing = []
     for key, q in quotes.items():
-        volume = float(q.get("last_quantity", 0)) * 390
+        volume = float(q.get("volume", 0))
         price = float(q.get("last_price", 0))
         daily_value_cr = (volume * price) / 1e7
         if daily_value_cr >= config.MIN_DAILY_TRADED_VALUE_CR:
@@ -98,16 +98,21 @@ def apply_spread_filter(quotes: dict) -> list:
     """Keep only instruments with bid-ask spread <= MAX_BID_ASK_SPREAD_PCT."""
     passing = []
     for key, q in quotes.items():
-        price = float(q.get("last_price", 1))
+        price = float(q.get("last_price", 0))
+        if price <= 0:
+            continue
         depth = q.get("depth", {})
-        buys = depth.get("buy", [{}])
-        sells = depth.get("sell", [{}])
-        best_bid = float(buys[0].get("price", price)) if buys else price
-        best_ask = float(sells[0].get("price", price)) if sells else price
-        if price > 0 and best_ask > 0:
-            spread_pct = (best_ask - best_bid) / price * 100
-            if spread_pct <= config.MAX_BID_ASK_SPREAD_PCT:
-                passing.append(key)
+        buys = depth.get("buy", [])
+        sells = depth.get("sell", [])
+        if not buys or not sells:
+            continue  # reject stocks with no market depth
+        best_bid = float(buys[0].get("price", 0))
+        best_ask = float(sells[0].get("price", 0))
+        if best_bid <= 0 or best_ask <= 0:
+            continue
+        spread_pct = (best_ask - best_bid) / price * 100
+        if spread_pct <= config.MAX_BID_ASK_SPREAD_PCT:
+            passing.append(key)
     return passing
 
 
