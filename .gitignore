@@ -3,3 +3,4 @@ trades.csv
 __pycache__/
 *.pyc
 .pytest_cache/
+.worktrees/
