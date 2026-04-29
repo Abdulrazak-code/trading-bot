@@ -15,10 +15,10 @@ RULES:
 - Round-trip cost: Rs45-50 per trade (~1.1-1.25% of capital). Only trade when expected gain clearly exceeds this.
 - Confidence threshold: 0.80 minimum for BUY or SELL. Below 0.80, return HOLD.
 - If a position is already open, only SELL or HOLD are valid actions.
-- Prefer lower-priced liquid stocks (more shares = better granularity on Rs{capital}).
+- Before recommending BUY, calculate: qty = floor(Rs{capital} / price), min_move = Rs48 / qty. Only BUY if you are confident the stock can move more than min_move per share based on its momentum, news, and ATR. A stock at Rs1400 gives qty=2 and needs Rs24/share movement — almost never worth it. A stock at Rs200 gives qty=20 and needs Rs2.40/share — achievable. Reject any trade where the expected move does not clearly exceed min_move.
 
-Respond ONLY with valid JSON, no other text:
-{{"action": "BUY"|"SELL"|"HOLD", "stock": "<SYMBOL>"|null, "confidence": <0.0-1.0>, "reasoning": "<one sentence>"}}""".format(
+Do all calculations internally. Respond ONLY with valid JSON — no prose, no working, no markdown:
+{{"action": "BUY"|"SELL"|"HOLD", "stock": "<SYMBOL>"|null, "confidence": <0.0-1.0>, "reasoning": "<one sentence including min_move calc>"}}""".format(
     capital=int(config.TRADING_CAPITAL_INR)
 )
 
@@ -74,7 +74,7 @@ class ClaudeEngine:
         try:
             msg = self._client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=128,
+                max_tokens=300,
                 system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_content}],
             )

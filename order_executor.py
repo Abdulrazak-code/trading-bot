@@ -133,7 +133,7 @@ class OrderExecutor:
 
     def execute_buy(self, symbol: str, price: float, cash: float, state: dict) -> dict:
         qty = math.floor(cash / price)
-        if qty < 1:
+        if qty < 10:
             return state
 
         if not self._paper:
