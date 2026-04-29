@@ -103,7 +103,7 @@ class OrderExecutor:
     def _place_order(self, instrument_key: str, side: str, qty: int, order_type: str = "MARKET") -> dict:
         body = {
             "quantity": qty,
-            "product": "MIS",
+            "product": "I",
             "validity": "DAY",
             "price": 0,
             "tag": "trading-bot",

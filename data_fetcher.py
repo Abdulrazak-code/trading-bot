@@ -23,14 +23,17 @@ def _headers() -> dict:
 
 
 def get_funds() -> float:
-    """Return available cash (INR) from Upstox."""
-    resp = requests.get(f"{_BASE}/user/fund-and-margin", headers=_headers(), timeout=10)
-    resp.raise_for_status()
-    data = resp.json()["data"]
-    for segment in data:
-        if segment.get("segment") == "SEC":
-            return float(segment.get("available_margin", 0))
-    return 0.0
+    """Return available cash (INR). Falls back to configured capital if API unavailable."""
+    try:
+        resp = requests.get(f"{_BASE}/user/fund-and-margin", headers=_headers(), timeout=10)
+        if resp.ok:
+            data = resp.json().get("data", [])
+            for segment in data:
+                if segment.get("segment") == "SEC":
+                    return float(segment.get("available_margin", 0))
+    except Exception:
+        pass
+    return float(config.TRADING_CAPITAL_INR)
 
 
 def get_instruments_nse() -> list:
