@@ -6,7 +6,7 @@ from notifier import Notifier
 
 @pytest.fixture
 def notifier():
-    return Notifier(telegram_token="tok", chat_id="123", twilio_sid=None, twilio_token=None, whatsapp_from=None)
+    return Notifier(telegram_token="tok", chat_id="123")
 
 
 def test_telegram_sends_message(notifier):

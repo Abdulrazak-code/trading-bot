@@ -45,10 +45,6 @@ class Scheduler:
         self._notifier = Notifier(
             telegram_token=config.TELEGRAM_BOT_TOKEN,
             chat_id=config.TELEGRAM_CHAT_ID,
-            twilio_sid=config.TWILIO_ACCOUNT_SID,
-            twilio_token=config.TWILIO_AUTH_TOKEN,
-            whatsapp_from=config.TWILIO_WHATSAPP_FROM,
-            whatsapp_to=config.WHATSAPP_TO,
         )
         self._eod_closed_date = None  # prevents double-selling if cycle fires multiple times at 15:15+
 

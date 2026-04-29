@@ -18,10 +18,6 @@ ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
 TELEGRAM_BOT_TOKEN = _require("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _require("TELEGRAM_CHAT_ID")
 
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
-WHATSAPP_TO = os.getenv("WHATSAPP_TO")
 
 PAPER_TRADE = os.getenv("PAPER_TRADE", "false").lower() == "true"
 USE_LEVERAGE = os.getenv("USE_LEVERAGE", "false").lower() == "true"
