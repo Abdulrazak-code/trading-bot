@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Bot Dashboard</title>
+<style>
+  body { font-family: monospace; background: #0d0d0d; color: #e0e0e0; padding: 20px; }
+  h1 { color: #00cc88; }
+  .card { background: #1a1a1a; border: 1px solid #333; padding: 16px; margin: 12px 0; border-radius: 6px; }
+  .label { color: #888; font-size: 0.85em; }
+  .value { font-size: 1.2em; font-weight: bold; }
+  .green { color: #00cc88; }
+  .red { color: #ff4455; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  th { color: #888; text-align: left; padding: 6px; border-bottom: 1px solid #333; }
+  td { padding: 6px; border-bottom: 1px solid #222; }
+  #status { font-size: 0.8em; color: #555; }
+</style>
+</head>
+<body>
+<h1>Trading Bot</h1>
+<div id="status">Loading...</div>
+
+<div class="card" id="position-card">
+  <div class="label">Open Position</div>
+  <div class="value" id="position">—</div>
+</div>
+
+<div style="display:flex;gap:12px">
+  <div class="card" style="flex:1">
+    <div class="label">Available Cash</div>
+    <div class="value" id="cash">—</div>
+  </div>
+  <div class="card" style="flex:1">
+    <div class="label">Today's P&L</div>
+    <div class="value" id="pnl">—</div>
+  </div>
+  <div class="card" style="flex:1">
+    <div class="label">Claude Budget Used</div>
+    <div class="value" id="budget">—</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="label">Recent Trades</div>
+  <table id="trades-table">
+    <thead><tr><th>Time</th><th>Action</th><th>Stock</th><th>Price</th><th>Reasoning</th></tr></thead>
+    <tbody id="trades-body"></tbody>
+  </table>
+</div>
+
+<script>
+async function refresh() {
+  try {
+    const [stateRes, tradesRes] = await Promise.all([fetch('/api/state'), fetch('/api/trades')]);
+    const state = await stateRes.json();
+    const trades = await tradesRes.json();
+
+    const pos = state.position;
+    document.getElementById('position').textContent = pos
+      ? `${pos.stock} @ ₹${pos.entry_price.toFixed(2)}  qty=${pos.qty}`
+      : '—';
+
+    document.getElementById('pnl').textContent = `₹${(state.daily_realised_pnl || 0).toFixed(2)}`;
+    document.getElementById('pnl').className = 'value ' + ((state.daily_realised_pnl || 0) >= 0 ? 'green' : 'red');
+
+    document.getElementById('budget').textContent =
+      `$${(state.claude_spend_usd || 0).toFixed(4)} / $9.00`;
+
+    const tbody = document.getElementById('trades-body');
+    tbody.innerHTML = '';
+    trades.slice().reverse().forEach(t => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${t.timestamp}</td><td>${t.action}</td><td>${t.coin||t.stock||'—'}</td><td>₹${parseFloat(t.price||0).toFixed(2)}</td><td>${t.reason||''}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    document.getElementById('status').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+  } catch(e) {
+    document.getElementById('status').textContent = `Error: ${e.message}`;
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
