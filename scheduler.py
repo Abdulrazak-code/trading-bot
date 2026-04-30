@@ -38,6 +38,11 @@ def is_eod_close_time(dt: datetime | None = None) -> bool:
     return t.hour == 15 and t.minute >= 15
 
 
+def is_too_late_to_buy(dt: datetime | None = None) -> bool:
+    t = dt or ist_now()
+    return t.hour > 14 or (t.hour == 14 and t.minute >= 30)
+
+
 class Scheduler:
     def __init__(self, state_path: str = "state.json"):
         self._state_path = state_path
@@ -50,18 +55,18 @@ class Scheduler:
         self._eod_closed_date = None  # prevents double-selling if cycle fires multiple times at 15:15+
 
     def run_cycle(self):
-        if not is_market_open():
-            return
-
-        state = load_state(self._state_path)
-        today = ist_now().date()
-
-        if is_eod_close_time() and self._eod_closed_date != today:
-            self._eod_closed_date = today
-            self._eod_close(state)
-            return
-
         try:
+            if not is_market_open():
+                return
+
+            state = load_state(self._state_path)
+            today = ist_now().date()
+
+            if is_eod_close_time() and self._eod_closed_date != today:
+                self._eod_closed_date = today
+                self._eod_close(state)
+                return
+
             self._trading_cycle(state)
         except Exception as e:
             log_trade("ERROR", None, 0, 0, "", 0, str(e))
@@ -191,7 +196,7 @@ class Scheduler:
             stock_data = candidates_data.get(decision.stock, {})
             price = stock_data.get("price", 0)
             ikey = stock_data.get("instrument_key", "")
-            if price > 0 and not self._executor.check_circuit_breaker(ikey):
+            if price > 0 and not is_too_late_to_buy() and not self._executor.check_circuit_breaker(ikey):
                 new_state = self._executor.execute_buy(decision.stock, price, cash, new_state, instrument_key=ikey)
                 save_state(new_state, self._state_path)
                 log_trade("BUY", decision.stock, price, price, decision.reasoning, cash)
@@ -226,5 +231,8 @@ class Scheduler:
         self.run_cycle()
         schedule.every(config.CYCLE_INTERVAL_MINUTES).minutes.do(self.run_cycle)
         while True:
-            schedule.run_pending()
+            try:
+                schedule.run_pending()
+            except Exception as e:
+                log_trade("ERROR", None, 0, 0, "", 0, f"scheduler error: {e}")
             time.sleep(30)

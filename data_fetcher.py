@@ -36,16 +36,27 @@ def get_funds() -> float:
     return float(config.TRADING_CAPITAL_INR)
 
 
+_instruments_cache: list = []
+
 def get_instruments_nse() -> list:
-    """Download NSE EQ instruments from Upstox instrument master."""
-    resp = requests.get(
-        "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
-        timeout=30,
-    )
-    resp.raise_for_status()
-    with gzip.open(io.BytesIO(resp.content)) as f:
-        instruments = json.load(f)
-    return [i for i in instruments if i.get("segment") == "NSE_EQ" and i.get("instrument_type") == "EQ"]
+    """Download NSE EQ instruments from Upstox instrument master. Returns cached list on failure."""
+    global _instruments_cache
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
+                timeout=30,
+            )
+            resp.raise_for_status()
+            with gzip.open(io.BytesIO(resp.content)) as f:
+                instruments = json.load(f)
+            _instruments_cache = [i for i in instruments if i.get("segment") == "NSE_EQ" and i.get("instrument_type") == "EQ"]
+            return _instruments_cache
+        except Exception:
+            if attempt < 2:
+                import time
+                time.sleep(5)
+    return _instruments_cache  # fall back to last successful fetch
 
 
 def get_market_quotes_ltp(instrument_keys: list) -> dict:
