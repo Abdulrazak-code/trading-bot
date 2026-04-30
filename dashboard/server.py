@@ -17,14 +17,14 @@ app.mount("/static", StaticFiles(directory=str(_static)), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 def root():
-    return (_static / "index.html").read_text()
+    return HTMLResponse(content=(_static / "index.html").read_text(encoding="utf-8"), media_type="text/html; charset=utf-8")
 
 
 @app.get("/api/state")
 def api_state():
     if not os.path.exists(_STATE_PATH):
         return JSONResponse({"error": "state.json not found"}, status_code=404)
-    with open(_STATE_PATH) as f:
+    with open(_STATE_PATH, encoding="utf-8") as f:
         return JSONResponse(json.load(f))
 
 
@@ -33,7 +33,7 @@ def api_trades():
     if not os.path.exists(_TRADES_PATH):
         return JSONResponse([])
     rows = []
-    with open(_TRADES_PATH, newline="") as f:
+    with open(_TRADES_PATH, newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
         for row in reader:
             rows.append(row)

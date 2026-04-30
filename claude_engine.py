@@ -13,13 +13,14 @@ You receive the top 50 pre-filtered stock candidates every cycle and output a st
 RULES:
 - Trading capital: Rs{capital}. One position at a time. All positions close at 3:15 PM IST.
 - Round-trip cost: Rs45-50 per trade (~1.1-1.25% of capital). Only trade when expected gain clearly exceeds this.
-- Confidence threshold: 0.80 minimum for BUY or SELL. Below 0.80, return HOLD.
+- Confidence threshold: {threshold} minimum for BUY or SELL. Below {threshold}, return HOLD.
 - If a position is already open, only SELL or HOLD are valid actions.
-- Before recommending BUY, calculate: qty = floor(Rs{capital} / price), min_move = Rs48 / qty. Only BUY if you are confident the stock can move more than min_move per share based on its momentum, news, and ATR. A stock at Rs1400 gives qty=2 and needs Rs24/share movement — almost never worth it. A stock at Rs200 gives qty=20 and needs Rs2.40/share — achievable. Reject any trade where the expected move does not clearly exceed min_move.
+- Before recommending BUY, calculate: qty = floor(Rs{capital} / price), min_move = Rs48 / qty. Only BUY if you are confident the stock can move more than min_move per share based on its momentum, news, and ATR. A stock at Rs1400 gives qty=7 and needs Rs6.86/share movement. A stock at Rs200 gives qty=50 and needs Rs0.96/share — very achievable. Reject any trade where the expected move does not clearly exceed min_move.
 
 Do all calculations internally. Respond ONLY with valid JSON — no prose, no working, no markdown:
 {{"action": "BUY"|"SELL"|"HOLD", "stock": "<SYMBOL>"|null, "confidence": <0.0-1.0>, "reasoning": "<one sentence including min_move calc>"}}""".format(
-    capital=int(config.TRADING_CAPITAL_INR)
+    capital=int(config.TRADING_CAPITAL_INR),
+    threshold=config.MIN_CONFIDENCE_THRESHOLD,
 )
 
 
@@ -74,21 +75,23 @@ class ClaudeEngine:
         try:
             msg = self._client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=300,
+                max_tokens=500,
                 system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user_content}],
+                messages=[{"role": "user", "content": user_content + "\n\nRespond with JSON only. No prose, no markdown, no explanation. Your entire response must be a single JSON object."}],
             )
         except Exception as e:
             return Decision("HOLD", None, 0.0, f"Claude API error: {e}"), state
 
         raw = msg.content[0].text.strip()
-        raw = re.sub(r'^```(?:json)?\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw).strip()
+        start = raw.find('{')
+        end = raw.rfind('}')
+        if start != -1 and end != -1:
+            raw = raw[start:end + 1]
 
         try:
             parsed = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
-            return Decision("HOLD", None, 0.0, "parse failure - treating as HOLD"), state
+            return Decision("HOLD", None, 0.0, f"parse failure: {raw[:120]}"), state
 
         action = parsed.get("action", "HOLD")
         confidence = float(parsed.get("confidence", 0.0))

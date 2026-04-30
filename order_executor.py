@@ -67,7 +67,7 @@ class OrderExecutor:
         """Returns True if stock appears circuit-locked (spread > 5% or near-zero depth)."""
         try:
             resp = requests.get(
-                f"{_BASE}/market-quote/ltp",
+                f"{_BASE}/market-quote/quotes",
                 headers=_headers(),
                 params={"instrument_key": instrument_key},
                 timeout=10,
@@ -131,15 +131,16 @@ class OrderExecutor:
         trades = resp.json().get("data", [])
         return int(sum(float(t.get("quantity", 0)) for t in trades))
 
-    def execute_buy(self, symbol: str, price: float, cash: float, state: dict) -> dict:
+    def execute_buy(self, symbol: str, price: float, cash: float, state: dict, instrument_key: str = None) -> dict:
         qty = math.floor(cash / price)
         if qty < 10:
             return state
 
+        ikey = instrument_key or f"NSE_EQ|{symbol}"
         if not self._paper:
-            if not self.validate_mis_eligibility(f"NSE_EQ|{symbol}"):
+            if not self.validate_mis_eligibility(ikey):
                 return state
-            order = self._place_order(f"NSE_EQ|{symbol}", "BUY", qty)
+            order = self._place_order(ikey, "BUY", qty)
             filled_qty = self._get_filled_qty(order["order_id"]) or qty
         else:
             filled_qty = qty
@@ -150,7 +151,7 @@ class OrderExecutor:
                 "stock": symbol,
                 "entry_price": price,
                 "qty": filled_qty,
-                "instrument_key": f"NSE_EQ|{symbol}",
+                "instrument_key": ikey,
             },
         }
 

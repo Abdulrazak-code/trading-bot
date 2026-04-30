@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
 import schedule
@@ -108,7 +109,8 @@ class Scheduler:
             return
 
         instruments = get_instruments_nse()
-        keys = [i["instrument_key"] for i in instruments[:200]]
+        key_to_sym = {i["instrument_key"]: i["trading_symbol"] for i in instruments}
+        keys = list(key_to_sym.keys())
         quotes = get_market_quotes_ltp(keys)
         liquid_keys = apply_liquidity_filter(quotes)
         filtered_keys = apply_spread_filter({k: quotes[k] for k in liquid_keys})
@@ -117,33 +119,33 @@ class Scheduler:
         all_entries, new_hashes = fetch_headlines(seen_hashes)
 
         candidate_keys = filtered_keys[:config.TOP_CANDIDATES * 2]
-        symbols = [k.split("|")[-1] for k in candidate_keys]
+        symbols = [key_to_sym.get(k, quotes[k].get("symbol", "")) for k in candidate_keys]
         headlines_map = match_headlines_to_symbols(all_entries, symbols)
 
-        candidates_data = {}
-        for key in candidate_keys:
-            if len(candidates_data) >= config.TOP_CANDIDATES:
-                break
-            sym = key.split("|")[-1]
+        def _fetch_one(key):
+            sym = key_to_sym.get(key, quotes[key].get("symbol", ""))
+            if not sym:
+                return None
             try:
                 df = get_ohlcv(key)
-                if df.empty or len(df) < 20:
-                    continue
+                if df.empty or len(df) < 5:
+                    return None
                 ind = compute_indicators(df)
             except Exception:
-                continue
+                return None
             q = quotes[key]
             price = float(q.get("last_price", 0))
             if price <= 0:
-                continue
+                return None
             depth = q.get("depth", {})
             buys = depth.get("buy", [])
             sells = depth.get("sell", [])
             best_bid = float(buys[0].get("price", price)) if buys else price
             best_ask = float(sells[0].get("price", price)) if sells else price
             spread_pct = (best_ask - best_bid) / price * 100 if price > 0 else 0.5
-            candidates_data[sym] = {
+            return sym, {
                 "price": price,
+                "instrument_key": key,
                 "volume_spike": ind["volume_spike"],
                 "rsi": ind["rsi"],
                 "macd_signal": ind["macd_signal"],
@@ -153,20 +155,44 @@ class Scheduler:
                 "atr": ind["atr"],
             }
 
+        candidates_data = {}
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_fetch_one, k): k for k in candidate_keys}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result and len(candidates_data) < config.TOP_CANDIDATES:
+                    sym, data = result
+                    candidates_data[sym] = data
+
         ranked = score_and_rank(candidates_data, n=config.TOP_CANDIDATES)
         compressed = {sym: compress_packet(sym, data, headlines_map.get(sym, [])) for sym, data in ranked.items()}
 
         cash = get_funds()
         portfolio = {"cash": cash, "position": pos}
+
+        # Skip Claude if no candidate has any meaningful signal (saves API cost)
+        has_signal = pos or any(
+            d["volume_spike"] >= 1.5 or abs(d["rsi"] - 50) >= 12 or abs(d["vwap_pct"]) >= 0.5
+            for d in candidates_data.values()
+        )
+        if not has_signal:
+            new_state = {**state, "cash": cash, "seen_headline_hashes": list(seen_hashes | new_hashes)[-500:]}
+            save_state(new_state, self._state_path)
+            log_trade("HOLD", None, 0, 0, "no signal — skipped Claude", cash)
+            return
+
         decision, new_state = self._engine.decide(compressed, portfolio, state)
 
         new_state["seen_headline_hashes"] = list(seen_hashes | new_hashes)[-500:]
+        new_state["cash"] = cash
         save_state(new_state, self._state_path)
 
         if decision.action == "BUY" and not pos:
-            price = candidates_data.get(decision.stock, {}).get("price", 0)
-            if price > 0:
-                new_state = self._executor.execute_buy(decision.stock, price, cash, new_state)
+            stock_data = candidates_data.get(decision.stock, {})
+            price = stock_data.get("price", 0)
+            ikey = stock_data.get("instrument_key", "")
+            if price > 0 and not self._executor.check_circuit_breaker(ikey):
+                new_state = self._executor.execute_buy(decision.stock, price, cash, new_state, instrument_key=ikey)
                 save_state(new_state, self._state_path)
                 log_trade("BUY", decision.stock, price, price, decision.reasoning, cash)
                 self._notifier.send(
@@ -183,11 +209,19 @@ class Scheduler:
                 self._notifier.format_trade("SELL", pos["stock"], pos["qty"], current_price,
                                             confidence=decision.confidence, reasoning=decision.reasoning, pnl=pnl)
             )
+        else:
+            log_trade("HOLD", decision.stock, 0, 0, decision.reasoning, cash)
+            self._notifier.send(
+                f"HOLD | conf={decision.confidence:.2f} | {decision.reasoning}"
+            )
 
     def start(self):
         if not auth.validate_token(config.UPSTOX_ACCESS_TOKEN):
             self._notifier.send("Upstox token invalid — run auth.py and restart")
             raise SystemExit("Invalid Upstox token")
+        state = load_state(self._state_path)
+        state["cash"] = get_funds()
+        save_state(state, self._state_path)
         print("Trading bot started.")
         self.run_cycle()
         schedule.every(config.CYCLE_INTERVAL_MINUTES).minutes.do(self.run_cycle)

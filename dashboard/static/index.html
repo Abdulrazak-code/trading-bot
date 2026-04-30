@@ -62,6 +62,7 @@ async function refresh() {
       ? `${pos.stock} @ ₹${pos.entry_price.toFixed(2)}  qty=${pos.qty}`
       : '—';
 
+    document.getElementById('cash').textContent = state.cash != null ? `₹${state.cash.toFixed(2)}` : '—';
     document.getElementById('pnl').textContent = `₹${(state.daily_realised_pnl || 0).toFixed(2)}`;
     document.getElementById('pnl').className = 'value ' + ((state.daily_realised_pnl || 0) >= 0 ? 'green' : 'red');
 

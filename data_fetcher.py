@@ -49,20 +49,24 @@ def get_instruments_nse() -> list:
 
 
 def get_market_quotes_ltp(instrument_keys: list) -> dict:
-    """Fetch LTP + depth for up to 500 instruments at once."""
+    """Fetch full market quotes (price, volume, depth) for up to 500 instruments at once.
+    Returns dict keyed by instrument_token (NSE_EQ|ISIN format) matching the input keys."""
     chunk_size = 500
     result = {}
     for i in range(0, len(instrument_keys), chunk_size):
         chunk = instrument_keys[i:i + chunk_size]
         params = {"instrument_key": ",".join(chunk)}
         resp = requests.get(
-            f"{_BASE}/market-quote/ltp",
+            f"{_BASE}/market-quote/quotes",
             headers=_headers(),
             params=params,
             timeout=15,
         )
         resp.raise_for_status()
-        result.update(resp.json().get("data", {}))
+        for v in resp.json().get("data", {}).values():
+            token = v.get("instrument_token")
+            if token:
+                result[token] = v
     return result
 
 
@@ -86,13 +90,15 @@ def get_ohlcv(instrument_key: str, interval: str = "1minute") -> pd.DataFrame:
 
 
 def apply_liquidity_filter(quotes: dict) -> list:
-    """Keep only instruments passing daily traded value filter."""
+    """Keep only instruments passing volume or traded-value filter.
+    Early in the day intraday volume is tiny, so also accept stocks with
+    at least MIN_DAILY_VOLUME shares traded regardless of value."""
     passing = []
     for key, q in quotes.items():
         volume = float(q.get("volume", 0))
         price = float(q.get("last_price", 0))
         daily_value_cr = (volume * price) / 1e7
-        if daily_value_cr >= config.MIN_DAILY_TRADED_VALUE_CR:
+        if daily_value_cr >= config.MIN_DAILY_TRADED_VALUE_CR or volume >= config.MIN_DAILY_VOLUME:
             passing.append(key)
     return passing
 

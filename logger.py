@@ -8,7 +8,7 @@ _HEADERS = ["timestamp", "action", "coin", "amount_inr", "price", "reason", "bal
 
 def log_trade(action, coin, amount_inr, price, reason, balance_after, error=""):
     file_exists = os.path.exists(LOG_FILE)
-    with open(LOG_FILE, "a", newline="") as f:
+    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=_HEADERS)
         if not file_exists:
             writer.writeheader()
