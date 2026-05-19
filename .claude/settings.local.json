@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Item .graphify_detect.json | Select-Object Length; [System.IO.File]::ReadAllBytes\\(\".graphify_detect.json\"\\) | Select-Object -First 4 | ForEach-Object { $_.ToString\\(\"X2\"\\) })",
+      "PowerShell(Get-Item *)",
+      "PowerShell(python graphify_ast_extract.py)",
+      "PowerShell(python graphify_cache_check.py)",
+      "PowerShell(python graphify_build.py)",
+      "PowerShell(python graphify_label.py)",
+      "PowerShell(python graphify_html.py)",
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :8000)",
+      "Bash(taskkill *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(Import-Csv *)"
+    ]
+  }
+}
