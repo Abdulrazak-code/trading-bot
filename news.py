@@ -3,6 +3,43 @@ from datetime import datetime, timezone
 
 import feedparser
 
+# Maps NSE ticker → lowercase company name fragment for headline matching.
+# Tickers that match verbatim in headlines don't need an entry here.
+_COMPANY_NAMES = {
+    "TATAMOTORS": "tata motors",
+    "HDFCBANK": "hdfc bank",
+    "ICICIBANK": "icici bank",
+    "KOTAKBANK": "kotak bank",
+    "BAJAJFINSV": "bajaj finserv",
+    "BAJFINANCE": "bajaj finance",
+    "SBILIFE": "sbi life",
+    "HCLTECH": "hcl tech",
+    "AXISBANK": "axis bank",
+    "ULTRACEMCO": "ultratech",
+    "SUNPHARMA": "sun pharma",
+    "ASIANPAINT": "asian paint",
+    "MARUTI": "maruti suzuki",
+    "ADANIPORTS": "adani ports",
+    "ADANIENT": "adani enterprises",
+    "ADANIGREEN": "adani green",
+    "INDUSINDBK": "indusind",
+    "TECHM": "tech mahindra",
+    "TATASTEEL": "tata steel",
+    "JSWSTEEL": "jsw steel",
+    "HINDALCO": "hindalco",
+    "VEDL": "vedanta",
+    "IOC": "indian oil",
+    "BPCL": "bharat petroleum",
+    "COALINDIA": "coal india",
+    "HEROMOTOCO": "hero motocorp",
+    "EICHERMOT": "eicher motors",
+    "DRREDDY": "dr reddy",
+    "DIVISLAB": "divi",
+    "APOLLOHOSP": "apollo hospital",
+    "TATACONSUM": "tata consumer",
+    "BAJAJ-AUTO": "bajaj auto",
+}
+
 _FEEDS = [
     "https://www.moneycontrol.com/rss/business.xml",
     "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
@@ -50,10 +87,17 @@ def fetch_headlines(seen_hashes: set) -> tuple:
 def match_headlines_to_symbols(
     raw_entries: list, symbols: list
 ) -> dict:
-    """Match headline text to stock symbols by substring search."""
+    """Match headline text to stock symbols by ticker or company name."""
     result = {s: [] for s in symbols}
     for _h, title in raw_entries:
+        title_lower = title.lower()
         for sym in symbols:
-            if sym.upper() in title.upper() and len(result[sym]) < 2:
+            if len(result[sym]) >= 2:
+                continue
+            if sym.lower() in title_lower:
+                result[sym].append(title)
+                continue
+            name = _COMPANY_NAMES.get(sym, "")
+            if name and name in title_lower:
                 result[sym].append(title)
     return result

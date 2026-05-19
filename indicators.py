@@ -66,24 +66,57 @@ def compute_indicators(df: pd.DataFrame) -> dict:
 def score_and_rank(candidates: dict, n: int = 50) -> dict:
     scored = []
     for symbol, data in candidates.items():
-        rsi_score = abs(data["rsi"] - 50) / 50
         volume_score = min(data["volume_spike"] / 5.0, 1.0)
-        macd_score = min(abs(data["macd_signal"]) / 2.0, 1.0)
-        vwap_score = min(abs(data["vwap_pct"]) / 2.0, 1.0)
+        # ATR as % of price — higher ATR means more room to clear break-even costs
+        atr_score = min(data["atr"] / (data["price"] * 0.005), 1.0) if data["price"] > 0 else 0.0
         spread_penalty = min(data["spread_pct"] / 0.5, 1.0)
-        composite = (volume_score * 0.4 + rsi_score * 0.2 + macd_score * 0.2 + vwap_score * 0.2) * (1 - spread_penalty * 0.3)
+        composite = (volume_score * 0.6 + atr_score * 0.4) * (1 - spread_penalty * 0.3)
         scored.append((symbol, composite, data))
     scored.sort(key=lambda x: x[1], reverse=True)
     return {sym: data for sym, _, data in scored[:n]}
 
 
+def compute_opening_range(df: pd.DataFrame) -> dict:
+    """Extract the 9:15–9:30 opening range from intraday 1-min candles."""
+    from datetime import time as _time
+    idx = df.index
+    if hasattr(idx, "tz") and idx.tz is not None:
+        times = pd.Series([ts.time() for ts in idx], index=idx)
+    else:
+        times = pd.Series([pd.Timestamp(ts).time() for ts in idx], index=idx)
+    mask = (times >= _time(9, 15)) & (times < _time(9, 30))
+    or_bars = df[mask]
+    if len(or_bars) < 3:
+        return {"or_high": 0.0, "or_low": 0.0, "or_direction": "UNKNOWN"}
+    or_high = float(or_bars["high"].max())
+    or_low = float(or_bars["low"].min())
+    or_open = float(or_bars["open"].iloc[0])
+    or_close = float(or_bars["close"].iloc[-1])
+    move_pct = (or_close - or_open) / or_open * 100 if or_open > 0 else 0.0
+    direction = "UP" if move_pct > 0.1 else "DOWN" if move_pct < -0.1 else "FLAT"
+    return {"or_high": round(or_high, 2), "or_low": round(or_low, 2), "or_direction": direction}
+
+
 def compress_packet(symbol: str, data: dict, headlines: list) -> str:
     news_str = " | ".join(headlines[:2]) if headlines else "no news"
     pct_from_high = (data['price'] - data['day_high']) / data['day_high'] * 100 if data['day_high'] > 0 else 0.0
+    price = data['price']
+    or_high = data.get('or_high', 0.0)
+    or_low = data.get('or_low', 0.0)
+    or_dir = data.get('or_direction', 'UNKNOWN')
+    if or_high > 0 and price > or_high:
+        or_status = f"BROKE-UP(+{(price - or_high) / or_high * 100:.2f}%)"
+    elif or_low > 0 and price < or_low:
+        or_status = f"BROKE-DOWN(-{(or_low - price) / or_low * 100:.2f}%)"
+    elif or_high > 0:
+        or_status = f"IN-RANGE(H={or_high} L={or_low})"
+    else:
+        or_status = "UNKNOWN"
     return (
-        f"{symbol}: Rs{data['price']:.1f} vol_spike={data['volume_spike']:.1f}x "
+        f"{symbol}: Rs{price:.1f} vol_spike={data['volume_spike']:.1f}x "
         f"RSI={data['rsi']:.0f} MACD_hist={data['macd_hist']:+.3f} "
         f"VWAP={data['vwap_pct']:+.1f}% BB={data['bb_position']:.2f} "
         f"ATR={data['atr']:.3f} H={data['day_high']:.1f} L={data['day_low']:.1f}({pct_from_high:+.1f}%from_high) "
+        f"OR={or_status}(init={or_dir}) "
         f"spread={data['spread_pct']:.2f}% | {news_str}"
     )

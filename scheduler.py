@@ -11,7 +11,7 @@ from data_fetcher import (
     apply_liquidity_filter, apply_spread_filter, get_ohlcv, get_cached_price,
     update_price_cache, get_nifty_change,
 )
-from indicators import compute_indicators, score_and_rank, compress_packet
+from indicators import compute_indicators, score_and_rank, compress_packet, compute_opening_range
 from news import fetch_headlines, match_headlines_to_symbols
 from claude_engine import ClaudeEngine, _candidates_hash
 from order_executor import OrderExecutor, load_state, save_state, calculate_charges
@@ -164,6 +164,7 @@ class Scheduler:
                 if df.empty or len(df) < 5:
                     return None
                 ind = compute_indicators(df)
+                orb = compute_opening_range(df)
             except Exception:
                 return None
             q = quotes[key]
@@ -178,6 +179,7 @@ class Scheduler:
             spread_pct = (best_ask - best_bid) / price * 100 if price > 0 else 0.5
             return sym, {
                 **ind,
+                **orb,
                 "price": price,
                 "instrument_key": key,
                 "spread_pct": spread_pct,
@@ -230,25 +232,6 @@ class Scheduler:
                 )
                 return
 
-            # Time-based exit — 30 min held with no profit
-            entry_time_str = pos.get("entry_time")
-            if entry_time_str:
-                from datetime import datetime as _dt
-                entry_dt = _dt.fromisoformat(entry_time_str)
-                held_minutes = (ist_now() - entry_dt).total_seconds() / 60
-                if held_minutes >= 30 and net_pnl > 0:
-                    new_state = self._executor.execute_sell(pos["stock"], pos_current_price, pos["qty"], state,
-                                                            f"time exit: {held_minutes:.0f} min held, locking profit")
-                    new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": pos_current_price, "at": ist_now().isoformat()}}
-                    save_state(new_state, self._state_path)
-                    balance_after = cash + sv - charges
-                    log_trade("SELL", pos["stock"], round(sv, 2), pos_current_price,
-                              f"time exit: held {held_minutes:.0f} min with net P&L Rs{net_pnl:.2f}", round(balance_after, 2))
-                    self._notifier.send(
-                        self._notifier.format_trade("SELL", pos["stock"], pos["qty"], pos_current_price,
-                                                    reasoning=f"time exit after {held_minutes:.0f} min", pnl=net_pnl)
-                    )
-                    return
         else:
             pos_for_claude = pos
         portfolio = {"cash": cash, "position": pos_for_claude, "nifty_change": nifty_change}
@@ -311,7 +294,8 @@ class Scheduler:
                 tp = (new_state.get("position") or {}).get("take_profit_price", 0)
                 sl = (new_state.get("position") or {}).get("stop_price", 0)
                 log_trade("BUY", decision.stock, round(price * bought_qty, 2), price,
-                          f"{decision.reasoning} | stop=Rs{sl:.2f} take-profit=Rs{tp:.2f}", cash)
+                          f"{decision.reasoning} | stop=Rs{sl:.2f} take-profit=Rs{tp:.2f}", cash,
+                          confidence=decision.confidence)
                 self._notifier.send(
                     self._notifier.format_trade("BUY", decision.stock, price=price,
                                                 confidence=decision.confidence, reasoning=decision.reasoning)
@@ -336,13 +320,14 @@ class Scheduler:
                 new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": current_price, "at": ist_now().isoformat()}}
                 save_state(new_state, self._state_path)
                 balance_after = cash + sell_value - charges
-                log_trade("SELL", pos["stock"], round(sell_value, 2), current_price, decision.reasoning, round(balance_after, 2))
+                log_trade("SELL", pos["stock"], round(sell_value, 2), current_price, decision.reasoning, round(balance_after, 2),
+                          confidence=decision.confidence)
                 self._notifier.send(
                     self._notifier.format_trade("SELL", pos["stock"], pos["qty"], current_price,
                                                 confidence=decision.confidence, reasoning=decision.reasoning, pnl=net_pnl)
                 )
         else:
-            log_trade("HOLD", decision.stock, 0, 0, decision.reasoning, cash)
+            log_trade("HOLD", decision.stock, 0, 0, decision.reasoning, cash, confidence=decision.confidence)
             self._notifier.send(
                 f"HOLD | conf={decision.confidence:.2f} | {decision.reasoning}"
             )
