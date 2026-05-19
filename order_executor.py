@@ -2,6 +2,9 @@ import json
 import math
 import os
 import time
+from datetime import datetime, timezone, timedelta
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 import requests
 
@@ -11,13 +14,17 @@ _BASE = "https://api.upstox.com/v2"
 _STOP_LOSS_PCT = config.STOP_LOSS_PCT / 100
 
 
-def calculate_charges(sell_value: float) -> float:
-    """Return total Upstox round-trip charges for a trade of the given sell value."""
-    brokerage = config.UPSTOX_FLAT_BROKERAGE_INR * 2
-    gst = brokerage * config.UPSTOX_GST_PCT
+def calculate_charges(buy_value: float, sell_value: float = None) -> float:
+    """Return total Upstox round-trip charges based on actual Upstox rate card."""
+    if sell_value is None:
+        sell_value = buy_value
+    brokerage = min(config.UPSTOX_FLAT_BROKERAGE_INR, buy_value * 0.001) + \
+                min(config.UPSTOX_FLAT_BROKERAGE_INR, sell_value * 0.001)
+    exchange = (buy_value + sell_value) * config.UPSTOX_EXCHANGE_CHARGE_PCT
+    gst = (brokerage + exchange) * config.UPSTOX_GST_PCT
     stt = sell_value * config.UPSTOX_STT_SELL_PCT
-    exchange = sell_value * config.UPSTOX_EXCHANGE_CHARGE_PCT
-    return brokerage + gst + stt + exchange
+    stamp_duty = buy_value * 0.00003  # 0.003% on buy side only
+    return brokerage + exchange + gst + stt + stamp_duty
 
 
 def _headers():
@@ -33,6 +40,7 @@ def load_state(path: str = "state.json") -> dict:
             "last_candidates_hash": "",
             "last_decision": None,
             "seen_headline_hashes": [],
+            "recently_sold": {},
         }
     with open(path) as f:
         return json.load(f)
@@ -60,6 +68,9 @@ class OrderExecutor:
         pos = state.get("position")
         if not pos:
             return False
+        stop_price = pos.get("stop_price")
+        if stop_price:
+            return current_price <= stop_price
         drop_pct = (pos["entry_price"] - current_price) / pos["entry_price"]
         return drop_pct >= _STOP_LOSS_PCT
 
@@ -74,14 +85,21 @@ class OrderExecutor:
             )
             if not resp.ok:
                 return False
-            q = resp.json().get("data", {}).get(instrument_key, {})
-            price = float(q.get("last_price", 1))
+            # Upstox keys this response by "EXCHANGE:SYMBOL" (e.g. NSE_EQ:PNB), not the instrument_key.
+            q = next(iter(resp.json().get("data", {}).values()), {})
+            price = float(q.get("last_price", 0))
+            if price <= 0:
+                return False
             depth = q.get("depth", {})
-            buys = depth.get("buy", [{}])
-            sells = depth.get("sell", [{}])
-            best_bid = float(buys[0].get("price", price)) if buys else price
-            best_ask = float(sells[0].get("price", price)) if sells else price
-            spread_pct = (best_ask - best_bid) / price * 100 if price > 0 else 0
+            buys = depth.get("buy") or []
+            sells = depth.get("sell") or []
+            if not buys or not sells:
+                return False
+            best_bid = float(buys[0].get("price", 0))
+            best_ask = float(sells[0].get("price", 0))
+            if best_bid <= 0 or best_ask <= 0:
+                return False
+            spread_pct = (best_ask - best_bid) / price * 100
             total_bid_qty = sum(d.get("quantity", 0) for d in buys)
             return spread_pct > 5.0 or total_bid_qty < 100
         except Exception:
@@ -131,7 +149,7 @@ class OrderExecutor:
         trades = resp.json().get("data", [])
         return int(sum(float(t.get("quantity", 0)) for t in trades))
 
-    def execute_buy(self, symbol: str, price: float, cash: float, state: dict, instrument_key: str = None) -> dict:
+    def execute_buy(self, symbol: str, price: float, cash: float, state: dict, instrument_key: str = None, atr: float = None) -> dict:
         qty = math.floor(cash / price)
         if qty < 10:
             return state
@@ -145,6 +163,14 @@ class OrderExecutor:
         else:
             filled_qty = qty
 
+        if atr and atr > 0:
+            stop_price = round(price - atr, 2)
+            take_profit_price = round(price + atr * 2, 2)
+        else:
+            stop_distance = price * _STOP_LOSS_PCT
+            stop_price = round(price - stop_distance, 2)
+            take_profit_price = round(price + stop_distance * 2, 2)
+
         return {
             **state,
             "position": {
@@ -152,6 +178,9 @@ class OrderExecutor:
                 "entry_price": price,
                 "qty": filled_qty,
                 "instrument_key": ikey,
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+                "entry_time": datetime.now(_IST).isoformat(),
             },
         }
 

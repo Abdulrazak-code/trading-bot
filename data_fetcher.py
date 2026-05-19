@@ -37,26 +37,44 @@ def get_funds() -> float:
 
 
 _instruments_cache: list = []
+_instruments_cache_time: datetime | None = None
 
-def get_instruments_nse() -> list:
-    """Download NSE EQ instruments from Upstox instrument master. Returns cached list on failure."""
-    global _instruments_cache
+
+_EQ_TYPES = {"NSE": {"EQ"}, "BSE": {"A", "B", "T"}}
+
+
+def _fetch_exchange_instruments(exchange: str) -> list:
+    url = f"https://assets.upstox.com/market-quote/instruments/exchange/{exchange}.json.gz"
+    segment = f"{exchange}_EQ"
+    eq_types = _EQ_TYPES.get(exchange, {"EQ"})
     for attempt in range(3):
         try:
-            resp = requests.get(
-                "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
-                timeout=30,
-            )
+            resp = requests.get(url, timeout=30)
             resp.raise_for_status()
             with gzip.open(io.BytesIO(resp.content)) as f:
                 instruments = json.load(f)
-            _instruments_cache = [i for i in instruments if i.get("segment") == "NSE_EQ" and i.get("instrument_type") == "EQ"]
-            return _instruments_cache
+            return [i for i in instruments if i.get("segment") == segment and i.get("instrument_type") in eq_types]
         except Exception:
             if attempt < 2:
                 import time
                 time.sleep(5)
-    return _instruments_cache  # fall back to last successful fetch
+    return []
+
+
+def get_instruments_nse() -> list:
+    """Download NSE + BSE EQ instruments. Re-fetches once per trading day."""
+    global _instruments_cache, _instruments_cache_time
+    now = datetime.now(_IST)
+    if _instruments_cache and _instruments_cache_time and _instruments_cache_time.date() == now.date():
+        return _instruments_cache
+    nse = _fetch_exchange_instruments("NSE")
+    bse = _fetch_exchange_instruments("BSE")
+    # Deduplicate by ISIN — prefer NSE listing when both exist
+    seen_isins = {i.get("isin") for i in nse if i.get("isin")}
+    bse_unique = [i for i in bse if i.get("isin") not in seen_isins]
+    _instruments_cache = nse + bse_unique
+    _instruments_cache_time = now
+    return _instruments_cache or nse  # fall back to NSE-only if BSE fetch failed
 
 
 def get_market_quotes_ltp(instrument_keys: list) -> dict:
@@ -78,6 +96,9 @@ def get_market_quotes_ltp(instrument_keys: list) -> dict:
             token = v.get("instrument_token")
             if token:
                 result[token] = v
+                price = float(v.get("last_price", 0))
+                if price > 0:
+                    update_price_cache(token, price)
     return result
 
 
@@ -134,6 +155,27 @@ def apply_spread_filter(quotes: dict) -> list:
         if spread_pct <= config.MAX_BID_ASK_SPREAD_PCT:
             passing.append(key)
     return passing
+
+
+def get_nifty_change() -> float:
+    """Returns NIFTY 50 % change from day open. Returns 0.0 on any failure."""
+    try:
+        resp = requests.get(
+            f"{_BASE}/market-quote/quotes",
+            headers=_headers(),
+            params={"instrument_key": "NSE_INDEX|Nifty 50"},
+            timeout=10,
+        )
+        if not resp.ok:
+            return 0.0
+        q = next(iter(resp.json().get("data", {}).values()), {})
+        ltp = float(q.get("last_price", 0))
+        open_price = float(q.get("ohlc", {}).get("open", 0))
+        if ltp <= 0 or open_price <= 0:
+            return 0.0
+        return (ltp - open_price) / open_price * 100
+    except Exception:
+        return 0.0
 
 
 def get_cached_price(instrument_key: str):

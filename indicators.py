@@ -19,6 +19,10 @@ def compute_indicators(df: pd.DataFrame) -> dict:
     macd_signal = float(macd_signal_series.iloc[-1]) if not macd_signal_series.isna().all() else 0.0
     if np.isnan(macd_signal):
         macd_signal = 0.0
+    macd_hist_series = macd.macd_diff()
+    macd_hist = float(macd_hist_series.iloc[-1]) if not macd_hist_series.isna().all() else 0.0
+    if np.isnan(macd_hist):
+        macd_hist = 0.0
 
     typical_price = (high + low + close) / 3
     vwap = (typical_price * volume).cumsum() / volume.cumsum()
@@ -48,11 +52,14 @@ def compute_indicators(df: pd.DataFrame) -> dict:
     return {
         "rsi": rsi,
         "macd_signal": macd_signal,
+        "macd_hist": macd_hist,
         "vwap_pct": vwap_pct,
         "bb_position": bb_position,
         "atr": atr,
         "volume_spike": volume_spike,
         "price": current_price,
+        "day_high": float(high.max()),
+        "day_low": float(low.min()),
     }
 
 
@@ -72,9 +79,11 @@ def score_and_rank(candidates: dict, n: int = 50) -> dict:
 
 def compress_packet(symbol: str, data: dict, headlines: list) -> str:
     news_str = " | ".join(headlines[:2]) if headlines else "no news"
+    pct_from_high = (data['price'] - data['day_high']) / data['day_high'] * 100 if data['day_high'] > 0 else 0.0
     return (
         f"{symbol}: Rs{data['price']:.1f} vol_spike={data['volume_spike']:.1f}x "
-        f"RSI={data['rsi']:.0f} MACD={data['macd_signal']:+.2f} "
+        f"RSI={data['rsi']:.0f} MACD_hist={data['macd_hist']:+.3f} "
         f"VWAP={data['vwap_pct']:+.1f}% BB={data['bb_position']:.2f} "
+        f"ATR={data['atr']:.3f} H={data['day_high']:.1f} L={data['day_low']:.1f}({pct_from_high:+.1f}%from_high) "
         f"spread={data['spread_pct']:.2f}% | {news_str}"
     )
