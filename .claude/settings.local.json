@@ -20,7 +20,12 @@
       "PowerShell(Get-Content *)",
       "PowerShell(Get-Process *)",
       "PowerShell(Test-Path *)",
-      "PowerShell(Import-Csv *)"
+      "PowerShell(Import-Csv *)",
+      "Bash(git fetch *)",
+      "PowerShell(Get-PnpDevice *)",
+      "PowerShell(Get-Service *)",
+      "PowerShell(pnputil *)",
+      "PowerShell(Get-ChildItem D:\\\\ | Where-Object { $_.Extension -match \"\\\\.\\(jpg|jpeg|png|bmp|webp\\)\" } | Select-Object Name, FullName)"
     ]
   }
 }
