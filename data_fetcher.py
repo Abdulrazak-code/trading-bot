@@ -80,25 +80,32 @@ def get_instruments_nse() -> list:
 def get_market_quotes_ltp(instrument_keys: list) -> dict:
     """Fetch full market quotes (price, volume, depth) for up to 500 instruments at once.
     Returns dict keyed by instrument_token (NSE_EQ|ISIN format) matching the input keys."""
+    import time as _time
     chunk_size = 500
     result = {}
     for i in range(0, len(instrument_keys), chunk_size):
         chunk = instrument_keys[i:i + chunk_size]
         params = {"instrument_key": ",".join(chunk)}
-        resp = requests.get(
-            f"{_BASE}/market-quote/quotes",
-            headers=_headers(),
-            params=params,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        for v in resp.json().get("data", {}).values():
-            token = v.get("instrument_token")
-            if token:
-                result[token] = v
-                price = float(v.get("last_price", 0))
-                if price > 0:
-                    update_price_cache(token, price)
+        for attempt in range(3):
+            try:
+                resp = requests.get(
+                    f"{_BASE}/market-quote/quotes",
+                    headers=_headers(),
+                    params=params,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                for v in resp.json().get("data", {}).values():
+                    token = v.get("instrument_token")
+                    if token:
+                        result[token] = v
+                        price = float(v.get("last_price", 0))
+                        if price > 0:
+                            update_price_cache(token, price)
+                break
+            except Exception:
+                if attempt < 2:
+                    _time.sleep(2)
     return result
 
 

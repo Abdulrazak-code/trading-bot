@@ -308,7 +308,7 @@ class Scheduler:
             take_profit = pos.get("take_profit_price", 0)
             at_target = take_profit > 0 and current_price >= take_profit
             if decision.confidence < config.MIN_SELL_CONFIDENCE_THRESHOLD and not at_target:
-                log_trade("HOLD", pos["stock"], 0, 0,
+                log_trade("HOLD", pos["stock"], round(current_price * pos["qty"], 2), current_price,
                           f"SELL blocked: confidence {decision.confidence:.2f} < {config.MIN_SELL_CONFIDENCE_THRESHOLD} and price Rs{current_price:.2f} not at 2:1 target Rs{take_profit:.2f} | {decision.reasoning}", cash)
                 self._notifier.send(f"SELL blocked: {pos['stock']} conf={decision.confidence:.2f} below {config.MIN_SELL_CONFIDENCE_THRESHOLD} sell threshold, not at TP Rs{take_profit:.2f}")
             else:
@@ -327,7 +327,9 @@ class Scheduler:
                                                 confidence=decision.confidence, reasoning=decision.reasoning, pnl=net_pnl)
                 )
         else:
-            log_trade("HOLD", decision.stock, 0, 0, decision.reasoning, cash, confidence=decision.confidence)
+            _hold_price = pos_current_price if pos and pos_current_price else 0
+            _hold_amount = round(_hold_price * pos["qty"], 2) if pos and _hold_price else 0
+            log_trade("HOLD", decision.stock, _hold_amount, _hold_price, decision.reasoning, cash, confidence=decision.confidence)
             self._notifier.send(
                 f"HOLD | conf={decision.confidence:.2f} | {decision.reasoning}"
             )
