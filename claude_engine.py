@@ -1,12 +1,42 @@
 import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 
 import anthropic
 
 import config
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _load_premarket_report() -> str:
+    """Load today's pre-market report if available, return as a context string."""
+    try:
+        if not os.path.exists("premarket_report.json"):
+            return ""
+        with open("premarket_report.json") as f:
+            r = json.load(f)
+        if r.get("date") != datetime.now(_IST).strftime("%Y-%m-%d"):
+            return ""  # stale report from previous day
+        stocks = ", ".join(r.get("stocks_to_watch", [])) or "none flagged"
+        sectors = ", ".join(r.get("sectors_to_watch", [])) or "none flagged"
+        return (
+            f"PRE-MARKET CONTEXT (generated {r.get('generated_at')} IST):\n"
+            f"  Outlook: {r.get('market_outlook')} | {r.get('expected_gap')}\n"
+            f"  PCR: {r.get('pcr')} — {r.get('pcr_signal')}\n"
+            f"  Max Pain: {r.get('max_pain')} — {r.get('max_pain_note')}\n"
+            f"  Key OI levels: {r.get('top_oi_strikes')}\n"
+            f"  Sectors to watch: {sectors}\n"
+            f"  Flagged stocks: {stocks}\n"
+            f"  Strategy: {r.get('strategy')}\n"
+            f"  Risk: {r.get('risk_note')}"
+        )
+    except Exception:
+        return ""
 
 _SYSTEM_PROMPT = """You are an AI intraday stock trading assistant for NSE/BSE markets.
 You receive the top 50 pre-filtered stock candidates every cycle and output a structured decision.
@@ -97,10 +127,12 @@ class ClaudeEngine:
         minutes_to_close = max(0, int((ist_now.replace(hour=15, minute=15, second=0, microsecond=0) - ist_now).total_seconds() / 60))
         nifty_change = portfolio.get("nifty_change", 0.0)
         nifty_line = f"NIFTY: {nifty_change:+.2f}% from open ({'market selling off' if nifty_change < -0.5 else 'market buying' if nifty_change > 0.5 else 'market flat'})"
+        premarket_ctx = _load_premarket_report()
         user_content = (
             f"Current time: {ist_now.strftime('%H:%M')} IST ({minutes_to_close} min until market close)\n"
             f"{nifty_line}\n"
-            f"Available cash: Rs{portfolio['cash']:.0f}\n"
+            + (f"{premarket_ctx}\n" if premarket_ctx else "")
+            + f"Available cash: Rs{portfolio['cash']:.0f}\n"
             f"{position_line}\n\n"
             f"Top {len(candidates)} candidates:\n{market_section}"
         )

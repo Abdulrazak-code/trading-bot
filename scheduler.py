@@ -482,11 +482,16 @@ class Scheduler:
             return
 
         # Skip Claude when no position and market context unchanged since last HOLD.
-        # Call Claude only if: NIFTY moved ≥0.2% since last call.
+        # Call Claude only if: NIFTY moved ≥0.2% since last call OR 15 minutes have passed.
         if not pos and (state.get("last_decision") or {}).get("action") == "HOLD":
             try:
                 _last_nifty = float(state.get("last_nifty_change", "nan"))
-                if abs(nifty_change - _last_nifty) < 0.2:
+                _last_claude_time = state.get("last_claude_call_time")
+                _minutes_since_claude = 999
+                if _last_claude_time:
+                    _last_dt = __import__("datetime").datetime.fromisoformat(_last_claude_time)
+                    _minutes_since_claude = (ist_now() - _last_dt).total_seconds() / 60
+                if abs(nifty_change - _last_nifty) < 0.2 and _minutes_since_claude < 15:
                     _d = state["last_decision"]
                     new_state = {**state, "cash": cash, "seen_headline_hashes": list(seen_hashes | new_hashes)[-500:]}
                     save_state(new_state, self._state_path)
@@ -539,6 +544,7 @@ class Scheduler:
         new_state["seen_headline_hashes"] = list(seen_hashes | new_hashes)[-500:]
         new_state["cash"] = cash
         new_state["last_nifty_change"] = nifty_change
+        new_state["last_claude_call_time"] = ist_now().isoformat()
         save_state(new_state, self._state_path)
 
         if decision.action == "BUY" and not pos:
@@ -695,7 +701,11 @@ class Scheduler:
         state = load_state(self._state_path)
         state["cash"] = get_funds()
         save_state(state, self._state_path)
+        from premarket import run_premarket_analysis
         print("Trading bot started.")
+        schedule.every().day.at("08:30").do(
+            lambda: run_premarket_analysis() if ist_now().weekday() < 5 else None
+        )
         self.run_cycle()
         schedule.every(1).minutes.do(self._fast_price_check)
         schedule.every(config.CYCLE_INTERVAL_MINUTES).minutes.do(self.run_cycle)
