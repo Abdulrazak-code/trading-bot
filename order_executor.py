@@ -181,6 +181,8 @@ class OrderExecutor:
                 "stop_price": stop_price,
                 "take_profit_price": take_profit_price,
                 "entry_time": datetime.now(_IST).isoformat(),
+                "atr": round(atr, 4) if atr else 0,
+                "peak_price": price,
             },
         }
 

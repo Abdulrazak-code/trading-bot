@@ -42,7 +42,12 @@ def is_eod_close_time(dt: datetime | None = None) -> bool:
 
 def is_too_late_to_buy(dt: datetime | None = None) -> bool:
     t = dt or ist_now()
-    return t.hour > 14 or (t.hour == 14 and t.minute >= 30)
+    return t.hour >= 15
+
+def is_late_session(dt: datetime | None = None) -> bool:
+    """14:30–15:00 window: stricter momentum required before allowing a BUY."""
+    t = dt or ist_now()
+    return t.hour == 14 and t.minute >= 30
 
 
 class Scheduler:
@@ -55,6 +60,11 @@ class Scheduler:
             chat_id=config.TELEGRAM_CHAT_ID,
         )
         self._eod_closed_date = None  # prevents double-selling if cycle fires multiple times at 15:15+
+        self._needs_claude_call = False   # set by fast loop when position needs urgent review
+        self._last_fast_price = {}        # instrument_key -> price at last fast check
+        self._rescan_needed = False       # set after any SELL to trigger immediate BUY rescan
+        self._peak_pnl = {}               # instrument_key -> highest net_pnl seen while in profit
+        self._vol_dry_count = {}          # instrument_key -> consecutive low vol_spike readings
 
     def run_cycle(self):
         try:
@@ -68,6 +78,10 @@ class Scheduler:
                 state["daily_realised_pnl"] = 0.0
                 state["last_trade_date"] = str(today)
                 state["recently_sold"] = {}
+                state["claude_spend_usd"] = 0.0
+                state["last_decision"] = {}
+                state["last_candidates_hash"] = ""
+                state["last_nifty_change"] = None
                 save_state(state, self._state_path)
 
             if is_eod_close_time() and self._eod_closed_date != today:
@@ -75,7 +89,11 @@ class Scheduler:
                 self._eod_close(state)
                 return
 
+            self._rescan_needed = False
             self._trading_cycle(state)
+            if self._rescan_needed and is_market_open() and not is_eod_close_time() and not is_too_late_to_buy():
+                self._rescan_needed = False
+                self._trading_cycle(load_state(self._state_path))
         except Exception as e:
             log_trade("ERROR", None, 0, 0, "", 0, str(e))
             self._notifier.send(f"Bot error: {e}")
@@ -92,12 +110,195 @@ class Scheduler:
             new_state = self._executor.execute_sell(
                 pos["stock"], price=current_price, qty=pos["qty"], state=state, reason="EOD forced close"
             )
+            new_state["last_decision"] = {}
+            new_state["last_nifty_change"] = None
             save_state(new_state, self._state_path)
             balance_after = state.get("cash", 0) + sell_value - charges
             log_trade("SELL", pos["stock"], round(sell_value, 2), current_price, "EOD forced close", round(balance_after, 2))
             self._notifier.send(f"EOD close: sold {pos['stock']} @ ₹{current_price:.2f}")
         except Exception as e:
             self._notifier.send(f"EOD CLOSE FAILED for {pos['stock']}: {e} — manual intervention required")
+
+    def _fast_price_check(self):
+        """1-minute loop: monitors open position for stop-loss, take-profit, and P&L shifts.
+        Sets _needs_claude_call=True when price moves >=0.5% or P&L turns positive."""
+        try:
+            if not is_market_open():
+                return
+            state = load_state(self._state_path)
+            pos = state.get("position")
+            if not pos:
+                return
+
+            try:
+                live_quotes = get_market_quotes_ltp([pos["instrument_key"]])
+                live_price = float((live_quotes.get(pos["instrument_key"]) or {}).get("last_price", 0))
+                if live_price > 0:
+                    update_price_cache(pos["instrument_key"], live_price)
+                else:
+                    live_price = get_cached_price(pos["instrument_key"]) or pos["entry_price"]
+            except Exception:
+                live_price = get_cached_price(pos["instrument_key"]) or pos["entry_price"]
+
+            # Trailing stop
+            _atr = pos.get("atr", 0)
+            if _atr > 0:
+                _entry = pos["entry_price"]
+                _peak = pos.get("peak_price", _entry)
+                if live_price > _peak:
+                    _peak = live_price
+                    pos["peak_price"] = _peak
+                    state["position"] = pos
+                _gain = _peak - _entry
+                if _gain >= _atr:
+                    _new_stop = round(_peak - _atr * 0.5, 2)
+                elif _gain >= _atr * 0.5:
+                    _new_stop = round(_entry, 2)
+                else:
+                    _new_stop = None
+                if _new_stop and _new_stop > pos.get("stop_price", 0):
+                    _old_stop = pos["stop_price"]
+                    pos["stop_price"] = _new_stop
+                    state["position"] = pos
+                    save_state(state, self._state_path)
+                    self._notifier.send(
+                        f"Trailing stop: {pos['stock']} Rs{_old_stop:.2f}→Rs{_new_stop:.2f} (peak Rs{_peak:.2f})"
+                    )
+
+            # Stop-loss
+            if self._executor.check_stop_loss(live_price, state):
+                sell_value = live_price * pos["qty"]
+                charges = calculate_charges(sell_value)
+                new_state = self._executor.execute_sell(
+                    pos["stock"], live_price, pos["qty"], state, reason="stop-loss triggered"
+                )
+                new_state["last_decision"] = {}
+                new_state["last_nifty_change"] = None
+                save_state(new_state, self._state_path)
+                pnl = (live_price - pos["entry_price"]) * pos["qty"]
+                balance_after = state.get("cash", 0) + sell_value - charges
+                log_trade("SELL", pos["stock"], round(sell_value, 2), live_price,
+                          "stop-loss triggered [1m]", round(balance_after, 2))
+                self._notifier.send(
+                    self._notifier.format_trade("SELL", pos["stock"], pos["qty"], live_price,
+                                                reasoning="stop-loss triggered", pnl=pnl)
+                )
+                self._needs_claude_call = False
+                self._last_fast_price.pop(pos["instrument_key"], None)
+                self._peak_pnl.pop(pos["instrument_key"], None)
+                self._vol_dry_count.pop(pos["instrument_key"], None)
+                if is_market_open() and not is_eod_close_time() and not is_too_late_to_buy():
+                    self.run_cycle()
+                return
+
+            # Take-profit
+            take_profit = pos.get("take_profit_price")
+            if take_profit and live_price >= take_profit:
+                sell_value = live_price * pos["qty"]
+                charges = calculate_charges(sell_value)
+                net_pnl = (live_price - pos["entry_price"]) * pos["qty"] - charges
+                new_state = self._executor.execute_sell(pos["stock"], live_price, pos["qty"], state, "take-profit hit")
+                new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": live_price, "at": ist_now().isoformat()}}
+                new_state["last_decision"] = {}
+                new_state["last_nifty_change"] = None
+                save_state(new_state, self._state_path)
+                balance_after = state.get("cash", 0) + sell_value - charges
+                log_trade("SELL", pos["stock"], round(sell_value, 2), live_price,
+                          f"take-profit hit @ Rs{take_profit:.2f} [1m]", round(balance_after, 2))
+                self._notifier.send(
+                    self._notifier.format_trade("SELL", pos["stock"], pos["qty"], live_price,
+                                                reasoning=f"take-profit hit @ Rs{take_profit:.2f}", pnl=net_pnl)
+                )
+                self._needs_claude_call = False
+                self._last_fast_price.pop(pos["instrument_key"], None)
+                self._peak_pnl.pop(pos["instrument_key"], None)
+                self._vol_dry_count.pop(pos["instrument_key"], None)
+                if is_market_open() and not is_eod_close_time() and not is_too_late_to_buy():
+                    self.run_cycle()
+                return
+
+            # P&L and price-move assessment
+            buy_val = pos["entry_price"] * pos["qty"]
+            sv = live_price * pos["qty"]
+            charges = calculate_charges(buy_val, sv)
+            net_pnl = (live_price - pos["entry_price"]) * pos["qty"] - charges
+
+            last_fast = self._last_fast_price.get(pos["instrument_key"], pos["entry_price"])
+            move_pct = abs(live_price - last_fast) / last_fast * 100 if last_fast > 0 else 0
+            self._last_fast_price[pos["instrument_key"]] = live_price
+
+            ikey = pos["instrument_key"]
+            if net_pnl > 0:
+                peak = self._peak_pnl.get(ikey, 0)
+                if net_pnl > peak:
+                    self._peak_pnl[ikey] = net_pnl  # profit growing — update peak, hold
+                trail_threshold = 0.90 if pos.get("tight_trail") else 0.75
+                if peak > 54 and net_pnl < peak * trail_threshold:
+                    # Profit dropped 25%+ from peak — trailing profit stop triggered
+                    sell_value = live_price * pos["qty"]
+                    charges = calculate_charges(sell_value)
+                    new_state = self._executor.execute_sell(
+                        pos["stock"], live_price, pos["qty"], state,
+                        reason=f"trailing profit stop: peak Rs{peak:.2f} → now Rs{net_pnl:.2f} [1m]"
+                    )
+                    new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": live_price, "at": ist_now().isoformat()}}
+                    new_state["last_decision"] = {}
+                    new_state["last_nifty_change"] = None
+                    save_state(new_state, self._state_path)
+                    balance_after = state.get("cash", 0) + sell_value - charges
+                    log_trade("SELL", pos["stock"], round(sell_value, 2), live_price,
+                              f"trailing profit stop — peak Rs{peak:.2f} dropped to Rs{net_pnl:.2f} [1m]",
+                              round(balance_after, 2))
+                    self._notifier.send(
+                        self._notifier.format_trade("SELL", pos["stock"], pos["qty"], live_price,
+                                                    reasoning=f"trailing profit stop (peak Rs{peak:.2f})",
+                                                    pnl=net_pnl)
+                    )
+                    self._peak_pnl.pop(ikey, None)
+                    self._vol_dry_count.pop(ikey, None)
+                    self._needs_claude_call = False
+                    if is_market_open() and not is_eod_close_time() and not is_too_late_to_buy():
+                        self.run_cycle()
+                    return
+            else:
+                self._peak_pnl.pop(ikey, None)  # reset peak if trade goes back negative
+
+            # Volume dry-up detection: if vol_spike drops below 1.5x for 2 consecutive
+            # 1-min checks, tighten the trailing profit stop from 25% to 10% drop from peak.
+            # This lets the trailing stop still capture maximum profit while exiting sooner
+            # if price starts reversing — no immediate sell.
+            try:
+                df_vd = get_ohlcv(pos["instrument_key"])
+                if not df_vd.empty:
+                    ind_vd = compute_indicators(df_vd)
+                    cur_vs = ind_vd.get("volume_spike", 1.0)
+                    entry_vs = pos.get("entry_vol_spike", 3.0)
+                    if cur_vs < 1.5:
+                        self._vol_dry_count[ikey] = self._vol_dry_count.get(ikey, 0) + 1
+                    else:
+                        self._vol_dry_count[ikey] = 0
+                        if pos.get("tight_trail"):
+                            pos["tight_trail"] = False
+                            state["position"] = pos
+                    if self._vol_dry_count.get(ikey, 0) >= 2 and not pos.get("tight_trail"):
+                        pos["tight_trail"] = True
+                        state["position"] = pos
+                        log_trade("HOLD", pos["stock"], round(live_price * pos["qty"], 2), live_price,
+                                  f"volume dry-up (vol={cur_vs:.1f}x, was {entry_vs:.1f}x) — trailing stop tightened to 10% [1m]",
+                                  state.get("cash", 0))
+                        self._notifier.send(
+                            f"Vol dry-up: {pos['stock']} vol={cur_vs:.1f}x (entry {entry_vs:.1f}x) — trailing stop tightened"
+                        )
+            except Exception:
+                pass
+
+            if move_pct >= 0.5 and not self._needs_claude_call:
+                self._needs_claude_call = True
+
+            save_state(state, self._state_path)
+
+        except Exception as e:
+            log_trade("ERROR", None, 0, 0, "", 0, f"fast_price_check error: {e}")
 
     def _trading_cycle(self, state: dict):
         pos = state.get("position")
@@ -115,6 +316,33 @@ class Scheduler:
             except Exception:
                 pos_current_price = get_cached_price(pos["instrument_key"]) or pos["entry_price"]
 
+            # Trailing stop: raise stop to protect gains as price moves in our favour.
+            # Phase 1 (peak ≥ entry + 0.5×ATR): move stop to entry (breakeven protection).
+            # Phase 2 (peak ≥ entry + 1×ATR): trail stop at peak - 0.5×ATR (lock in half the first ATR).
+            _atr = pos.get("atr", 0)
+            if _atr > 0 and pos_current_price:
+                _entry = pos["entry_price"]
+                _peak = pos.get("peak_price", _entry)
+                if pos_current_price > _peak:
+                    _peak = pos_current_price
+                    pos["peak_price"] = _peak
+                    state["position"] = pos
+                _gain = _peak - _entry
+                if _gain >= _atr:
+                    _new_stop = round(_peak - _atr * 0.5, 2)
+                elif _gain >= _atr * 0.5:
+                    _new_stop = round(_entry, 2)
+                else:
+                    _new_stop = None
+                if _new_stop and _new_stop > pos.get("stop_price", 0):
+                    _old_stop = pos["stop_price"]
+                    pos["stop_price"] = _new_stop
+                    state["position"] = pos
+                    save_state(state, self._state_path)
+                    self._notifier.send(
+                        f"Trailing stop: {pos['stock']} Rs{_old_stop:.2f}→Rs{_new_stop:.2f} (peak Rs{_peak:.2f})"
+                    )
+
             if self._executor.check_circuit_breaker(pos["instrument_key"]):
                 self._notifier.send(f"WARNING: {pos['stock']} appears circuit-locked")
                 return
@@ -125,6 +353,8 @@ class Scheduler:
                 new_state = self._executor.execute_sell(
                     pos["stock"], pos_current_price, pos["qty"], state, reason="stop-loss triggered"
                 )
+                new_state["last_decision"] = {}
+                new_state["last_nifty_change"] = None
                 save_state(new_state, self._state_path)
                 pnl = (pos_current_price - pos["entry_price"]) * pos["qty"]
                 balance_after = state.get("cash", 0) + sell_value - charges
@@ -133,6 +363,7 @@ class Scheduler:
                     self._notifier.format_trade("SELL", pos["stock"], pos["qty"], pos_current_price,
                                                 reasoning="stop-loss triggered", pnl=pnl)
                 )
+                self._rescan_needed = True
                 return
 
         if self._executor.is_daily_loss_limit_reached(state):
@@ -222,6 +453,8 @@ class Scheduler:
             if take_profit and pos_current_price >= take_profit:
                 new_state = self._executor.execute_sell(pos["stock"], pos_current_price, pos["qty"], state, "take-profit hit")
                 new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": pos_current_price, "at": ist_now().isoformat()}}
+                new_state["last_decision"] = {}
+                new_state["last_nifty_change"] = None
                 save_state(new_state, self._state_path)
                 balance_after = cash + sv - charges
                 log_trade("SELL", pos["stock"], round(sv, 2), pos_current_price,
@@ -230,6 +463,7 @@ class Scheduler:
                     self._notifier.format_trade("SELL", pos["stock"], pos["qty"], pos_current_price,
                                                 reasoning=f"take-profit hit @ Rs{take_profit:.2f}", pnl=net_pnl)
                 )
+                self._rescan_needed = True
                 return
 
         else:
@@ -247,10 +481,64 @@ class Scheduler:
             log_trade("HOLD", None, 0, 0, "no signal — skipped Claude", cash)
             return
 
+        # Skip Claude when no position and market context unchanged since last HOLD.
+        # Call Claude only if: NIFTY moved ≥0.2% since last call.
+        if not pos and (state.get("last_decision") or {}).get("action") == "HOLD":
+            try:
+                _last_nifty = float(state.get("last_nifty_change", "nan"))
+                if abs(nifty_change - _last_nifty) < 0.2:
+                    _d = state["last_decision"]
+                    new_state = {**state, "cash": cash, "seen_headline_hashes": list(seen_hashes | new_hashes)[-500:]}
+                    save_state(new_state, self._state_path)
+                    log_trade("HOLD", None, 0, 0,
+                              f"market unchanged — skipped Claude | {_d['reasoning']}", cash, confidence=_d["confidence"])
+                    return
+            except (ValueError, TypeError, KeyError):
+                pass
+
+        # Skip Claude when last SELL was blocked (below threshold) and price hasn't moved.
+        # If confidence now meets threshold, fall through so it actually executes.
+        if pos and (state.get("last_decision") or {}).get("action") == "SELL":
+            try:
+                _d = state["last_decision"]
+                if _d.get("stock") == pos["stock"]:
+                    _last_price = float(state.get("last_candidates_hash", "").split(":")[-1])
+                    _move_pct = abs(pos_current_price - _last_price) / _last_price * 100
+                    if _move_pct < 0.3 and float(_d.get("confidence", 0)) < config.MIN_SELL_CONFIDENCE_THRESHOLD:
+                        _hold_amount = round(pos_current_price * pos["qty"], 2)
+                        new_state = {**state, "cash": cash, "seen_headline_hashes": list(seen_hashes | new_hashes)[-500:]}
+                        save_state(new_state, self._state_path)
+                        log_trade("HOLD", pos["stock"], _hold_amount, pos_current_price,
+                                  f"SELL pending — skipped Claude | {_d['reasoning']}", cash, confidence=_d["confidence"])
+                        return
+            except (ValueError, TypeError, KeyError):
+                pass
+
+        # Skip Claude when holding a stable position to preserve API budget.
+        # Call Claude only if: price moved ≥0.3% since last call, OR within 0.5% of SL/TP.
+        if pos and (state.get("last_decision") or {}).get("action") == "HOLD":
+            try:
+                _last_price = float(state.get("last_candidates_hash", "").split(":")[-1])
+                _move_pct = abs(pos_current_price - _last_price) / _last_price * 100
+                _stop_gap_pct = (pos_current_price - pos.get("stop_price", 0)) / pos_current_price * 100
+                _tp_gap_pct = (pos.get("take_profit_price", pos_current_price * 2) - pos_current_price) / pos_current_price * 100
+                if _move_pct < 0.3 and _stop_gap_pct > 0.5 and _tp_gap_pct > 0.5 and not self._needs_claude_call:
+                    _d = state["last_decision"]
+                    _hold_amount = round(pos_current_price * pos["qty"], 2)
+                    new_state = {**state, "cash": cash, "seen_headline_hashes": list(seen_hashes | new_hashes)[-500:]}
+                    save_state(new_state, self._state_path)
+                    log_trade("HOLD", pos["stock"], _hold_amount, pos_current_price,
+                              f"stable — skipped Claude | {_d['reasoning']}", cash, confidence=_d["confidence"])
+                    return
+            except (ValueError, TypeError, KeyError):
+                pass
+
+        self._needs_claude_call = False
         decision, new_state = self._engine.decide(compressed, portfolio, state)
 
         new_state["seen_headline_hashes"] = list(seen_hashes | new_hashes)[-500:]
         new_state["cash"] = cash
+        new_state["last_nifty_change"] = nifty_change
         save_state(new_state, self._state_path)
 
         if decision.action == "BUY" and not pos:
@@ -266,11 +554,28 @@ class Scheduler:
                 block_reason = f"price Rs{price:.2f} exceeds Rs1000 limit"
             elif atr > 0 and qty_est > 0 and (atr * qty_est) < 81:
                 block_reason = f"ATR×qty=Rs{atr*qty_est:.1f} too small vs charges — net R/R would be negative"
+            elif stock_data.get("bb_position", 0) > 1.0:
+                block_reason = f"overextension veto: bb_position={stock_data.get('bb_position'):.2f} > 1.0 (above upper band)"
+            elif stock_data.get("rsi", 0) > 78:
+                block_reason = f"overextension veto: RSI={stock_data.get('rsi'):.0f} > 78"
             elif not (stock_data.get("volume_spike", 1.0) >= 1.5 or
                       abs(stock_data.get("rsi", 50.0) - 50) >= 12 or
                       abs(stock_data.get("vwap_pct", 0.0)) >= 0.5):
                 block_reason = (f"no momentum: vol_spike={stock_data.get('volume_spike',1):.1f}x "
                                 f"RSI={stock_data.get('rsi',50):.0f} VWAP={stock_data.get('vwap_pct',0):+.1f}%")
+            elif (stock_data.get("day_high", 0) > 0
+                  and (stock_data.get("day_high", price) - price) / stock_data.get("day_high", price) < 0.005
+                  and (price + 2 * atr) > stock_data.get("day_high", price) + atr
+                  and stock_data.get("volume_spike", 0) < 10):
+                day_high = stock_data.get("day_high", price)
+                tp_price = price + 2 * atr
+                block_reason = (f"near day high: price Rs{price:.2f} within 0.5% of day_high Rs{day_high:.2f}, "
+                                f"take-profit Rs{tp_price:.2f} requires Rs{tp_price - day_high:.2f} beyond day high "
+                                f"but vol_spike={stock_data.get('volume_spike',0):.1f}x < 10x — insufficient momentum to break resistance")
+            elif (stock_data.get("vwap_pct", 0) < -0.5 and stock_data.get("rsi", 50) > 40
+                  and stock_data.get("or_direction", "") != "DOWN"):
+                block_reason = (f"VWAP divergence: price {stock_data.get('vwap_pct',0):+.1f}% below VWAP "
+                                f"RSI={stock_data.get('rsi',50):.0f} or_dir={stock_data.get('or_direction','')} — no VWAP support, not oversold enough for bounce")
             elif decision.stock in state.get("recently_sold", {}):
                 sold_info = state["recently_sold"][decision.stock]
                 sold_at = sold_info.get("at", "")
@@ -284,11 +589,23 @@ class Scheduler:
                     if room_to_high < min_move * 2:
                         block_reason = f"re-buy blocked: only Rs{room_to_high:.2f} room to day_high Rs{day_high:.2f}, need Rs{min_move*2:.2f} — upside too limited"
             elif is_too_late_to_buy():
-                block_reason = "too late to buy (>= 14:30 IST)"
+                block_reason = "too late to buy (>= 15:00 IST)"
+            elif is_late_session():
+                vol_ok = stock_data.get("volume_spike", 0) >= 3.0
+                macd_ok = stock_data.get("macd_hist", 0) > 0
+                or_high = stock_data.get("or_high", 0)
+                broke_up = or_high > 0 and price > or_high
+                if not (vol_ok and macd_ok and broke_up):
+                    block_reason = (
+                        f"late session (14:30–15:00): requires BROKE-UP + vol_spike>=3x + MACD>0 | "
+                        f"vol={stock_data.get('volume_spike',0):.1f}x macd={stock_data.get('macd_hist',0):+.3f} broke_up={broke_up}"
+                    )
             elif self._executor.check_circuit_breaker(ikey):
                 block_reason = f"{decision.stock} appears circuit-locked"
             if block_reason is None:
                 new_state = self._executor.execute_buy(decision.stock, price, cash, new_state, instrument_key=ikey, atr=atr)
+                if new_state.get("position"):
+                    new_state["position"]["entry_vol_spike"] = stock_data.get("volume_spike", 1.0)
                 save_state(new_state, self._state_path)
                 bought_qty = (new_state.get("position") or {}).get("qty", 0)
                 tp = (new_state.get("position") or {}).get("take_profit_price", 0)
@@ -316,17 +633,54 @@ class Scheduler:
                 charges = calculate_charges(sell_value)
                 gross_pnl = (current_price - pos["entry_price"]) * pos["qty"]
                 net_pnl = gross_pnl - charges
-                new_state = self._executor.execute_sell(pos["stock"], current_price, pos["qty"], new_state, decision.reasoning)
-                new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": current_price, "at": ist_now().isoformat()}}
-                save_state(new_state, self._state_path)
-                balance_after = cash + sell_value - charges
-                log_trade("SELL", pos["stock"], round(sell_value, 2), current_price, decision.reasoning, round(balance_after, 2),
-                          confidence=decision.confidence)
-                self._notifier.send(
-                    self._notifier.format_trade("SELL", pos["stock"], pos["qty"], current_price,
-                                                confidence=decision.confidence, reasoning=decision.reasoning, pnl=net_pnl)
-                )
+                # Confirmation gate: losing position requires 2 consecutive SELL signals before executing.
+                # Profitable positions execute immediately — no confirmation needed.
+                if net_pnl < 0:
+                    def_count = pos.get("defensive_sell_count", 0) + 1
+                    if def_count < 2:
+                        pos["defensive_sell_count"] = def_count
+                        new_state["position"] = pos
+                        save_state(new_state, self._state_path)
+                        log_trade("HOLD", pos["stock"], round(current_price * pos["qty"], 2), current_price,
+                                  f"defensive SELL signal {def_count}/2 — awaiting confirmation | {decision.reasoning}",
+                                  cash, confidence=decision.confidence)
+                        self._notifier.send(
+                            f"SELL signal {def_count}/2 for {pos['stock']} (P&L Rs{net_pnl:+.2f}) — holding for confirmation next cycle"
+                        )
+                    else:
+                        new_state = self._executor.execute_sell(pos["stock"], current_price, pos["qty"], new_state, decision.reasoning)
+                        new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": current_price, "at": ist_now().isoformat()}}
+                        new_state["last_decision"] = {}
+                        new_state["last_nifty_change"] = None
+                        save_state(new_state, self._state_path)
+                        balance_after = cash + sell_value - charges
+                        log_trade("SELL", pos["stock"], round(sell_value, 2), current_price,
+                                  f"confirmed defensive exit (2/2) | {decision.reasoning}", round(balance_after, 2),
+                                  confidence=decision.confidence)
+                        self._notifier.send(
+                            self._notifier.format_trade("SELL", pos["stock"], pos["qty"], current_price,
+                                                        confidence=decision.confidence, reasoning=decision.reasoning, pnl=net_pnl)
+                        )
+                        self._rescan_needed = True
+                else:
+                    new_state = self._executor.execute_sell(pos["stock"], current_price, pos["qty"], new_state, decision.reasoning)
+                    new_state["recently_sold"] = {**state.get("recently_sold", {}), pos["stock"]: {"price": current_price, "at": ist_now().isoformat()}}
+                    new_state["last_decision"] = {}
+                    new_state["last_nifty_change"] = None
+                    save_state(new_state, self._state_path)
+                    balance_after = cash + sell_value - charges
+                    log_trade("SELL", pos["stock"], round(sell_value, 2), current_price, decision.reasoning, round(balance_after, 2),
+                              confidence=decision.confidence)
+                    self._notifier.send(
+                        self._notifier.format_trade("SELL", pos["stock"], pos["qty"], current_price,
+                                                    confidence=decision.confidence, reasoning=decision.reasoning, pnl=net_pnl)
+                    )
+                    self._rescan_needed = True
         else:
+            if pos and pos.get("defensive_sell_count", 0) > 0:
+                pos["defensive_sell_count"] = 0
+                new_state["position"] = pos
+                save_state(new_state, self._state_path)
             _hold_price = pos_current_price if pos and pos_current_price else 0
             _hold_amount = round(_hold_price * pos["qty"], 2) if pos and _hold_price else 0
             log_trade("HOLD", decision.stock, _hold_amount, _hold_price, decision.reasoning, cash, confidence=decision.confidence)
@@ -343,6 +697,7 @@ class Scheduler:
         save_state(state, self._state_path)
         print("Trading bot started.")
         self.run_cycle()
+        schedule.every(1).minutes.do(self._fast_price_check)
         schedule.every(config.CYCLE_INTERVAL_MINUTES).minutes.do(self.run_cycle)
         while True:
             try:
