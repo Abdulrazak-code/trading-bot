@@ -49,6 +49,30 @@ def compute_indicators(df: pd.DataFrame) -> dict:
     current_volume = float(volume.iloc[-1])
     volume_spike = current_volume / avg_volume if avg_volume > 0 else 1.0
 
+    # Price direction: is the stock still falling or has it started to turn?
+    # last_green = latest candle is bullish (buying pressure appeared)
+    last_open = float(df["open"].iloc[-1]) if "open" in df.columns else current_price
+    last_green = current_price > last_open
+
+    # price_slope = change in close over last 3 candles (positive = rising, negative = still falling)
+    if len(close) >= 3:
+        price_slope = float(close.iloc[-1] - close.iloc[-3])
+    elif len(close) >= 2:
+        price_slope = float(close.iloc[-1] - close.iloc[-2])
+    else:
+        price_slope = 0.0
+
+    # consecutive_red = how many candles in a row have been falling (close < open)
+    consecutive_red = 0
+    if "open" in df.columns:
+        for i in range(1, min(6, len(df)) + 1):
+            c = float(df["close"].iloc[-i])
+            o = float(df["open"].iloc[-i])
+            if c < o:
+                consecutive_red += 1
+            else:
+                break
+
     return {
         "rsi": rsi,
         "macd_signal": macd_signal,
@@ -60,6 +84,9 @@ def compute_indicators(df: pd.DataFrame) -> dict:
         "price": current_price,
         "day_high": float(high.max()),
         "day_low": float(low.min()),
+        "last_green": last_green,
+        "price_slope": round(price_slope, 4),
+        "consecutive_red": consecutive_red,
     }
 
 
@@ -112,11 +139,18 @@ def compress_packet(symbol: str, data: dict, headlines: list) -> str:
         or_status = f"IN-RANGE(H={or_high} L={or_low})"
     else:
         or_status = "UNKNOWN"
+    slope = data.get("price_slope", 0.0)
+    red_count = data.get("consecutive_red", 0)
+    last_green = data.get("last_green", True)
+    trend_str = (
+        f"trend={'UP' if (slope > 0 and last_green) else 'TURNING' if last_green else 'DOWN'}"
+        f"(slope={slope:+.3f} red={red_count})"
+    )
     return (
         f"{symbol}: Rs{price:.1f} vol_spike={data['volume_spike']:.1f}x "
         f"RSI={data['rsi']:.0f} MACD_hist={data['macd_hist']:+.3f} "
         f"VWAP={data['vwap_pct']:+.1f}% BB={data['bb_position']:.2f} "
         f"ATR={data['atr']:.3f} H={data['day_high']:.1f} L={data['day_low']:.1f}({pct_from_high:+.1f}%from_high) "
-        f"OR={or_status}(init={or_dir}) "
+        f"OR={or_status}(init={or_dir}) {trend_str} "
         f"spread={data['spread_pct']:.2f}% | {news_str}"
     )
