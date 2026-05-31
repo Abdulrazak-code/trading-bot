@@ -73,6 +73,8 @@ def compute_indicators(df: pd.DataFrame) -> dict:
             else:
                 break
 
+    candle = detect_candle_patterns(df)
+
     return {
         "rsi": rsi,
         "macd_signal": macd_signal,
@@ -87,7 +89,77 @@ def compute_indicators(df: pd.DataFrame) -> dict:
         "last_green": last_green,
         "price_slope": round(price_slope, 4),
         "consecutive_red": consecutive_red,
+        "candle_pattern": candle["candle_pattern"],
+        "candle_signal": candle["candle_signal"],
     }
+
+
+def detect_candle_patterns(df: pd.DataFrame) -> dict:
+    """Detect key candlestick patterns from the last 3 candles. Returns pattern name and BULLISH/BEARISH/NONE signal."""
+    if "open" not in df.columns or len(df) < 3:
+        return {"candle_pattern": "none", "candle_signal": "NONE"}
+
+    c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+
+    def _body(c):    return abs(float(c["close"]) - float(c["open"]))
+    def _lo(c):      return float(min(c["open"], c["close"])) - float(c["low"])
+    def _hi(c):      return float(c["high"]) - float(max(c["open"], c["close"]))
+    def _green(c):   return float(c["close"]) > float(c["open"])
+    def _red(c):     return float(c["close"]) < float(c["open"])
+
+    b1, b2, b3 = _body(c1), _body(c2), _body(c3)
+    lw3, uw3 = _lo(c3), _hi(c3)
+
+    # ── 3-candle patterns (highest priority) ────────────────────────────────
+    if _green(c1) and _green(c2) and _green(c3) and b1 > 0 and b2 > 0 and b3 > 0:
+        if float(c2["close"]) > float(c1["close"]) and float(c3["close"]) > float(c2["close"]):
+            return {"candle_pattern": "three_white_soldiers", "candle_signal": "BULLISH"}
+
+    if _red(c1) and _red(c2) and _red(c3) and b1 > 0 and b2 > 0 and b3 > 0:
+        if float(c2["close"]) < float(c1["close"]) and float(c3["close"]) < float(c2["close"]):
+            return {"candle_pattern": "three_black_crows", "candle_signal": "BEARISH"}
+
+    # Morning Star: big red → small body → big green closing above c1 midpoint
+    if _red(c1) and b1 > 0 and b2 < b1 * 0.3 and _green(c3) and b3 > 0:
+        if float(c3["close"]) > (float(c1["open"]) + float(c1["close"])) / 2:
+            return {"candle_pattern": "morning_star", "candle_signal": "BULLISH"}
+
+    # Evening Star: big green → small body → big red closing below c1 midpoint
+    if _green(c1) and b1 > 0 and b2 < b1 * 0.3 and _red(c3) and b3 > 0:
+        if float(c3["close"]) < (float(c1["open"]) + float(c1["close"])) / 2:
+            return {"candle_pattern": "evening_star", "candle_signal": "BEARISH"}
+
+    # ── 2-candle patterns ────────────────────────────────────────────────────
+    if _red(c2) and _green(c3) and b3 > b2:
+        if float(c3["open"]) <= float(c2["close"]) and float(c3["close"]) >= float(c2["open"]):
+            return {"candle_pattern": "bullish_engulfing", "candle_signal": "BULLISH"}
+
+    if _green(c2) and _red(c3) and b3 > b2:
+        if float(c3["open"]) >= float(c2["close"]) and float(c3["close"]) <= float(c2["open"]):
+            return {"candle_pattern": "bearish_engulfing", "candle_signal": "BEARISH"}
+
+    # ── 1-candle patterns ────────────────────────────────────────────────────
+    # Bullish Marubozu: full green candle, wicks < 5% of body
+    if _green(c3) and b3 > 0 and lw3 <= b3 * 0.05 and uw3 <= b3 * 0.05:
+        return {"candle_pattern": "bullish_marubozu", "candle_signal": "BULLISH"}
+
+    # Bearish Marubozu: full red candle, wicks < 5% of body
+    if _red(c3) and b3 > 0 and lw3 <= b3 * 0.05 and uw3 <= b3 * 0.05:
+        return {"candle_pattern": "bearish_marubozu", "candle_signal": "BEARISH"}
+
+    # Hammer: small body, long lower wick (>= 2x body), tiny upper wick
+    if b3 > 0 and lw3 >= 2 * b3 and uw3 <= b3 * 0.5:
+        return {"candle_pattern": "hammer", "candle_signal": "BULLISH"}
+
+    # Inverted Hammer (green): long upper wick, tiny lower wick — bullish reversal at bottom
+    if _green(c3) and b3 > 0 and uw3 >= 2 * b3 and lw3 <= b3 * 0.5:
+        return {"candle_pattern": "inverted_hammer", "candle_signal": "BULLISH"}
+
+    # Shooting Star (red): long upper wick, tiny lower wick — bearish at top
+    if _red(c3) and b3 > 0 and uw3 >= 2 * b3 and lw3 <= b3 * 0.5:
+        return {"candle_pattern": "shooting_star", "candle_signal": "BEARISH"}
+
+    return {"candle_pattern": "none", "candle_signal": "NONE"}
 
 
 def score_and_rank(candidates: dict, n: int = 50) -> dict:
@@ -146,11 +218,13 @@ def compress_packet(symbol: str, data: dict, headlines: list) -> str:
         f"trend={'UP' if (slope > 0 and last_green) else 'TURNING' if last_green else 'DOWN'}"
         f"(slope={slope:+.3f} red={red_count})"
     )
+    candle_pattern = data.get("candle_pattern", "none")
+    candle_str = f" candle={candle_pattern}" if candle_pattern != "none" else ""
     return (
         f"{symbol}: Rs{price:.1f} vol_spike={data['volume_spike']:.1f}x "
         f"RSI={data['rsi']:.0f} MACD_hist={data['macd_hist']:+.3f} "
         f"VWAP={data['vwap_pct']:+.1f}% BB={data['bb_position']:.2f} "
         f"ATR={data['atr']:.3f} H={data['day_high']:.1f} L={data['day_low']:.1f}({pct_from_high:+.1f}%from_high) "
-        f"OR={or_status}(init={or_dir}) {trend_str} "
+        f"OR={or_status}(init={or_dir}) {trend_str}{candle_str} "
         f"spread={data['spread_pct']:.2f}% | {news_str}"
     )
