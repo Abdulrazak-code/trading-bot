@@ -128,6 +128,54 @@ def get_ohlcv(instrument_key: str, interval: str = "1minute") -> pd.DataFrame:
     return df[["open", "high", "low", "close", "volume"]].astype(float)
 
 
+_prev_day_cache: dict = {}
+_prev_day_cache_date: str = ""
+
+
+def get_prev_day_hlc(instrument_key: str):
+    """Return previous trading day's {high, low, close} from the daily candle.
+    Cached per instrument for the current day. Returns None on failure."""
+    global _prev_day_cache, _prev_day_cache_date
+    today = datetime.now(_IST).strftime("%Y-%m-%d")
+    with _cache_lock:
+        if _prev_day_cache_date != today:
+            _prev_day_cache = {}
+            _prev_day_cache_date = today
+        if instrument_key in _prev_day_cache:
+            return _prev_day_cache[instrument_key]
+    try:
+        to_date = datetime.now(_IST).strftime("%Y-%m-%d")
+        from_date = (datetime.now(_IST) - timedelta(days=10)).strftime("%Y-%m-%d")
+        resp = requests.get(
+            f"{_BASE}/historical-candle/{instrument_key}/day/{to_date}/{from_date}",
+            headers=_headers(),
+            timeout=10,
+        )
+        if not resp.ok:
+            return None
+        candles = resp.json().get("data", {}).get("candles", [])
+        # Candles are newest-first; index 0 is today (in-progress), index 1 is prev completed day.
+        # If market closed/pre-open, index 0 may already be the last completed day.
+        if len(candles) < 2:
+            result = None
+        else:
+            # Pick the most recent candle whose date != today
+            prev = None
+            for c in candles:
+                cdate = str(c[0])[:10]
+                if cdate != today:
+                    prev = c
+                    break
+            if prev is None:
+                prev = candles[1]
+            result = {"high": float(prev[2]), "low": float(prev[3]), "close": float(prev[4])}
+        with _cache_lock:
+            _prev_day_cache[instrument_key] = result
+        return result
+    except Exception:
+        return None
+
+
 def apply_liquidity_filter(quotes: dict) -> list:
     """Keep only instruments passing volume or traded-value filter.
     Early in the day intraday volume is tiny, so also accept stocks with

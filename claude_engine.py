@@ -104,7 +104,7 @@ class ClaudeEngine:
         state: dict,
         candidates_hash: str = None,
     ) -> tuple:
-        if state["claude_spend_usd"] >= config.CLAUDE_API_BUDGET_STOP_USD:
+        if state.get("claude_spend_usd", 0.0) >= config.CLAUDE_API_BUDGET_STOP_USD:
             return Decision("HOLD", None, 0.0, "budget limit reached - manual restart required"), state
 
         c_hash = candidates_hash or _candidates_hash(candidates)
@@ -196,7 +196,7 @@ class ClaudeEngine:
         )
         new_state = {
             **state,
-            "claude_spend_usd": state["claude_spend_usd"] + cost,
+            "claude_spend_usd": state.get("claude_spend_usd", 0.0) + cost,
             "last_candidates_hash": full_hash,
             "last_decision": {"action": action, "stock": stock, "confidence": confidence, "reasoning": reasoning},
         }

@@ -288,7 +288,8 @@ def run_premarket_analysis():
     print("  Fetching news headlines...")
     try:
         news_entries, _ = fetch_headlines(set())
-        news = [e.get("title", "") for e in news_entries[:8] if e.get("title")]
+        # fetch_headlines returns (hash, title) tuples, not dicts
+        news = [title for _h, title in news_entries[:8] if title]
     except Exception:
         news = []
 

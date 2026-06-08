@@ -3,6 +3,49 @@ import pandas as pd
 import ta
 
 
+def _supertrend(high, low, close, period: int = 10, multiplier: float = 3.0):
+    """Supertrend indicator. Returns (line_value, is_uptrend) for the latest candle.
+    Standard intraday setting: 10-period ATR, 3x multiplier."""
+    atr = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=period).average_true_range()
+    hl2 = (high + low) / 2
+    upper_basic = hl2 + multiplier * atr
+    lower_basic = hl2 - multiplier * atr
+
+    n = len(close)
+    final_upper = [0.0] * n
+    final_lower = [0.0] * n
+    st = [0.0] * n
+    up = [True] * n
+
+    c = close.values
+    ub = upper_basic.values
+    lb = lower_basic.values
+
+    for i in range(n):
+        if i == 0 or np.isnan(ub[i]) or np.isnan(lb[i]):
+            final_upper[i] = ub[i] if not np.isnan(ub[i]) else c[i]
+            final_lower[i] = lb[i] if not np.isnan(lb[i]) else c[i]
+            st[i] = final_upper[i]
+            up[i] = True
+            continue
+
+        final_upper[i] = ub[i] if (ub[i] < final_upper[i-1] or c[i-1] > final_upper[i-1]) else final_upper[i-1]
+        final_lower[i] = lb[i] if (lb[i] > final_lower[i-1] or c[i-1] < final_lower[i-1]) else final_lower[i-1]
+
+        if st[i-1] == final_upper[i-1]:
+            if c[i] <= final_upper[i]:
+                st[i] = final_upper[i]; up[i] = False
+            else:
+                st[i] = final_lower[i]; up[i] = True
+        else:
+            if c[i] >= final_lower[i]:
+                st[i] = final_lower[i]; up[i] = True
+            else:
+                st[i] = final_upper[i]; up[i] = False
+
+    return round(float(st[-1]), 2), bool(up[-1])
+
+
 def compute_indicators(df: pd.DataFrame) -> dict:
     close = df["close"]
     high = df["high"]
@@ -29,6 +72,8 @@ def compute_indicators(df: pd.DataFrame) -> dict:
     vwap_val = float(vwap.iloc[-1])
     current_price = float(close.iloc[-1])
     vwap_pct = (current_price - vwap_val) / vwap_val * 100 if vwap_val > 0 else 0.0
+    # How many of the last 5 candles closed above VWAP (0–5); ≥3 = sustained bullish positioning
+    vwap_above_count = int(sum(1 for c, v in zip(close.iloc[-5:], vwap.iloc[-5:]) if c > v))
 
     bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
     upper = bb.bollinger_hband()
@@ -73,6 +118,34 @@ def compute_indicators(df: pd.DataFrame) -> dict:
             else:
                 break
 
+    # EMA 8 / 13 / 21 crossover
+    ema8  = float(close.ewm(span=8,  adjust=False).mean().iloc[-1])
+    ema13 = float(close.ewm(span=13, adjust=False).mean().iloc[-1])
+    ema21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
+    ema_bullish = ema8 > ema13 > ema21          # full bullish stack
+    ema_bearish = ema8 < ema13 < ema21          # full bearish stack
+    ema_spread_pct = (ema8 - ema21) / ema21 * 100 if ema21 > 0 else 0.0
+
+    # ADX (10-period) — measures trend strength; > 25 = trending, < 20 = choppy
+    adx_ind = ta.trend.ADXIndicator(high=high, low=low, close=close, window=10)
+    adx_series = adx_ind.adx()
+    adx = float(adx_series.iloc[-1]) if not adx_series.isna().all() else 0.0
+    if np.isnan(adx):
+        adx = 0.0
+
+    # OHL signal: first candle's open == its low → buyers absorbed all selling at open
+    ohl_buy = False
+    if "open" in df.columns and len(df) >= 1:
+        first = df.iloc[0]
+        tolerance = float(first["open"]) * 0.001   # within 0.1%
+        ohl_buy = abs(float(first["open"]) - float(first["low"])) <= tolerance
+
+    # Momentum signal (BB + RSI + ADX combined)
+    momentum_long = bb_position > 0.95 and rsi > 50 and adx > 25
+
+    # Supertrend (10-period, 3x ATR) — direction + line value (acts as trailing stop reference)
+    st_line, st_uptrend = _supertrend(high, low, close, period=10, multiplier=3.0)
+
     candle = detect_candle_patterns(df)
 
     return {
@@ -80,6 +153,7 @@ def compute_indicators(df: pd.DataFrame) -> dict:
         "macd_signal": macd_signal,
         "macd_hist": macd_hist,
         "vwap_pct": vwap_pct,
+        "vwap_above_count": vwap_above_count,
         "bb_position": bb_position,
         "atr": atr,
         "volume_spike": volume_spike,
@@ -91,6 +165,17 @@ def compute_indicators(df: pd.DataFrame) -> dict:
         "consecutive_red": consecutive_red,
         "candle_pattern": candle["candle_pattern"],
         "candle_signal": candle["candle_signal"],
+        "ema8": round(ema8, 2),
+        "ema13": round(ema13, 2),
+        "ema21": round(ema21, 2),
+        "ema_bullish": ema_bullish,
+        "ema_bearish": ema_bearish,
+        "ema_spread_pct": round(ema_spread_pct, 3),
+        "adx": round(adx, 1),
+        "ohl_buy": ohl_buy,
+        "momentum_long": momentum_long,
+        "supertrend": st_line,
+        "supertrend_up": st_uptrend,
     }
 
 
@@ -196,6 +281,19 @@ def compute_opening_range(df: pd.DataFrame) -> dict:
     return {"or_high": round(or_high, 2), "or_low": round(or_low, 2), "or_direction": direction}
 
 
+def compute_pivots(prev_high: float, prev_low: float, prev_close: float) -> dict:
+    """Classic floor-trader pivot points from previous day's H/L/C."""
+    p = (prev_high + prev_low + prev_close) / 3
+    rng = prev_high - prev_low
+    return {
+        "pivot": round(p, 2),
+        "r1": round(2 * p - prev_low, 2),
+        "s1": round(2 * p - prev_high, 2),
+        "r2": round(p + rng, 2),
+        "s2": round(p - rng, 2),
+    }
+
+
 def compress_packet(symbol: str, data: dict, headlines: list) -> str:
     news_str = " | ".join(headlines[:2]) if headlines else "no news"
     pct_from_high = (data['price'] - data['day_high']) / data['day_high'] * 100 if data['day_high'] > 0 else 0.0
@@ -220,11 +318,45 @@ def compress_packet(symbol: str, data: dict, headlines: list) -> str:
     )
     candle_pattern = data.get("candle_pattern", "none")
     candle_str = f" candle={candle_pattern}" if candle_pattern != "none" else ""
+    ema_str = (
+        f"EMA8/13/21={data.get('ema8',0):.1f}/{data.get('ema13',0):.1f}/{data.get('ema21',0):.1f}"
+        f"({'BULL' if data.get('ema_bullish') else 'BEAR' if data.get('ema_bearish') else 'MIX'}"
+        f" spread={data.get('ema_spread_pct',0):+.2f}%)"
+    )
+    adx_str = f"ADX={data.get('adx', 0):.0f}({'trend' if data.get('adx', 0) >= 25 else 'chop'})"
+    ohl_str = " OHL-BUY" if data.get("ohl_buy") else ""
+    mom_str = " MOMENTUM-LONG" if data.get("momentum_long") else ""
+    st_line = data.get("supertrend")
+    st_str = ""
+    if st_line:
+        st_str = f" ST={st_line}({'UP' if data.get('supertrend_up') else 'DOWN'})"
+
+    gap_pct = data.get("gap_pct")
+    gap_str = ""
+    if gap_pct is not None and abs(gap_pct) >= 0.5:
+        gap_str = f" GAP={gap_pct:+.1f}%({'UP' if gap_pct > 0 else 'DOWN'})"
+
+    pivot = data.get("pivot")
+    piv_str = ""
+    if pivot:
+        # which level is price reacting to?
+        r1, s1 = data.get("r1", 0), data.get("s1", 0)
+        if price > r1:
+            loc = f"above R1({r1})"
+        elif price > pivot:
+            loc = f"P({pivot})-R1({r1})"
+        elif price > s1:
+            loc = f"S1({s1})-P({pivot})"
+        else:
+            loc = f"below S1({s1})"
+        piv_str = f" PIVOT[{loc}]"
+
     return (
         f"{symbol}: Rs{price:.1f} vol_spike={data['volume_spike']:.1f}x "
         f"RSI={data['rsi']:.0f} MACD_hist={data['macd_hist']:+.3f} "
         f"VWAP={data['vwap_pct']:+.1f}% BB={data['bb_position']:.2f} "
         f"ATR={data['atr']:.3f} H={data['day_high']:.1f} L={data['day_low']:.1f}({pct_from_high:+.1f}%from_high) "
         f"OR={or_status}(init={or_dir}) {trend_str}{candle_str} "
+        f"{ema_str} {adx_str}{st_str}{ohl_str}{mom_str}{gap_str}{piv_str} "
         f"spread={data['spread_pct']:.2f}% | {news_str}"
     )

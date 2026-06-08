@@ -150,7 +150,21 @@ class OrderExecutor:
         return int(sum(float(t.get("quantity", 0)) for t in trades))
 
     def execute_buy(self, symbol: str, price: float, cash: float, state: dict, instrument_key: str = None, atr: float = None) -> dict:
-        qty = math.floor(cash / price)
+        # Stop distance (risk per share) determines position size.
+        if atr and atr > 0:
+            stop_distance = atr
+            stop_price = round(price - atr, 2)
+            take_profit_price = round(price + atr * 2, 2)
+        else:
+            stop_distance = price * _STOP_LOSS_PCT
+            stop_price = round(price - stop_distance, 2)
+            take_profit_price = round(price + stop_distance * 2, 2)
+
+        # Risk-based sizing: lose at most RISK_PER_TRADE_INR if the stop hits,
+        # capped by available cash. This replaces all-in full-capital sizing.
+        risk_qty = math.floor(config.RISK_PER_TRADE_INR / stop_distance) if stop_distance > 0 else 0
+        cash_qty = math.floor(cash / price)
+        qty = min(risk_qty, cash_qty)
         if qty < 10:
             return state
 
@@ -162,14 +176,6 @@ class OrderExecutor:
             filled_qty = self._get_filled_qty(order["order_id"]) or qty
         else:
             filled_qty = qty
-
-        if atr and atr > 0:
-            stop_price = round(price - atr, 2)
-            take_profit_price = round(price + atr * 2, 2)
-        else:
-            stop_distance = price * _STOP_LOSS_PCT
-            stop_price = round(price - stop_distance, 2)
-            take_profit_price = round(price + stop_distance * 2, 2)
 
         return {
             **state,
@@ -190,14 +196,16 @@ class OrderExecutor:
         pos = state.get("position", {})
         entry = pos.get("entry_price", price) if pos else price
         sell_value = price * qty
+        buy_value = entry * qty
         gross_pnl = (price - entry) * qty
-        charges = calculate_charges(sell_value)
+        charges = calculate_charges(buy_value, sell_value)
         net_pnl = gross_pnl - charges
 
         if not self._paper:
+            ikey = (state.get("position") or {}).get("instrument_key") or f"NSE_EQ|{symbol}"
             for attempt in range(2):
                 try:
-                    self._place_order(f"NSE_EQ|{symbol}", "SELL", qty)
+                    self._place_order(ikey, "SELL", qty)
                     break
                 except Exception:
                     if attempt == 0:

@@ -28,11 +28,20 @@ CLAUDE_API_BUDGET_STOP_USD = float(os.getenv("CLAUDE_API_BUDGET_STOP_USD", "8.50
 MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.80"))
 MIN_SELL_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_SELL_CONFIDENCE_THRESHOLD", "0.80"))
 REBUY_COOLDOWN_MINUTES = int(os.getenv("REBUY_COOLDOWN_MINUTES", "60"))
+MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", "0.3")) / 100   # stop must be ≥ this % of price
 MIN_DAILY_TRADED_VALUE_CR = float(os.getenv("MIN_DAILY_TRADED_VALUE_CR", "5"))
 MIN_DAILY_VOLUME = int(os.getenv("MIN_DAILY_VOLUME", "50000"))
 MAX_BID_ASK_SPREAD_PCT = float(os.getenv("MAX_BID_ASK_SPREAD_PCT", "0.5"))
 TOP_CANDIDATES = int(os.getenv("TOP_CANDIDATES", "50"))
 MAX_DAILY_LOSS_INR = float(os.getenv("MAX_DAILY_LOSS_INR", "200"))
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "3"))
+RISK_PER_TRADE_INR = float(os.getenv("RISK_PER_TRADE_INR", "1000"))
+# Trailing-stop tuning (in ATR units). Kept configurable for forward-testing.
+# Defaults are the original tight values — a backtest sweep showed loosening did
+# NOT improve results on historical data (all configs lost; tight was among best).
+BREAKEVEN_TRIGGER_ATR = float(os.getenv("BREAKEVEN_TRIGGER_ATR", "0.5"))
+TRAIL_TRIGGER_ATR = float(os.getenv("TRAIL_TRIGGER_ATR", "1.0"))
+TRAIL_DISTANCE_ATR = float(os.getenv("TRAIL_DISTANCE_ATR", "0.5"))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))
 UPSTOX_FLAT_BROKERAGE_INR = float(os.getenv("UPSTOX_FLAT_BROKERAGE_INR", "20"))
 UPSTOX_STT_SELL_PCT = float(os.getenv("UPSTOX_STT_SELL_PCT", "0.00025"))
